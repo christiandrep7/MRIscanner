@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict
+
+import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+
+from src.config import DataConfig
+
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+@dataclass
+class MRIDataBundle:
+    train_loader: DataLoader
+    val_loader: DataLoader
+    test_loader: DataLoader
+    class_to_idx: Dict[str, int]
+    idx_to_class: Dict[int, str]
+    train_size: int
+    val_size: int
+    test_size: int
+
+
+def get_train_transforms(image_size: int) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=15),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
+
+def get_eval_transforms(image_size: int) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
+
+def _split_train_val_indices(num_items: int, val_split: float, seed: int) -> tuple[list[int], list[int]]:
+    indices = list(range(num_items))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    val_count = int(num_items * val_split)
+    val_indices = indices[:val_count]
+    train_indices = indices[val_count:]
+    return train_indices, val_indices
+
+
+def build_dataloaders(config: DataConfig) -> MRIDataBundle:
+    train_dir = config.data_root / config.train_dir_name
+    test_dir = config.data_root / config.test_dir_name
+    if not train_dir.exists() or not test_dir.exists():
+        raise FileNotFoundError(
+            f"Expected dataset folders at '{train_dir}' and '{test_dir}'. "
+            "Run download_mri_dataset.py first."
+        )
+
+    full_train_for_aug = datasets.ImageFolder(train_dir, transform=get_train_transforms(config.image_size))
+    full_train_for_eval = datasets.ImageFolder(train_dir, transform=get_eval_transforms(config.image_size))
+    test_dataset = datasets.ImageFolder(test_dir, transform=get_eval_transforms(config.image_size))
+
+    train_indices, val_indices = _split_train_val_indices(
+        num_items=len(full_train_for_aug),
+        val_split=config.val_split,
+        seed=config.seed,
+    )
+
+    train_subset = Subset(full_train_for_aug, train_indices)
+    val_subset = Subset(full_train_for_eval, val_indices)
+
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_subset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    class_to_idx = full_train_for_aug.class_to_idx
+    idx_to_class = {v: k for k, v in class_to_idx.items()}
+
+    return MRIDataBundle(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        class_to_idx=class_to_idx,
+        idx_to_class=idx_to_class,
+        train_size=len(train_subset),
+        val_size=len(val_subset),
+        test_size=len(test_dataset),
+    )
+
+
+def show_random_batch(data_bundle: MRIDataBundle, output_path: Path | None = None, max_images: int = 12) -> None:
+    images, labels = next(iter(data_bundle.train_loader))
+    images = images[:max_images]
+    labels = labels[:max_images]
+
+    cols = 4
+    rows = (len(images) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 3 * rows))
+    axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    for i, ax in enumerate(axes):
+        if i >= len(images):
+            ax.axis("off")
+            continue
+        img = images[i].permute(1, 2, 0).cpu().numpy()
+        img = (img * IMAGENET_STD) + IMAGENET_MEAN
+        img = img.clip(0, 1)
+        label_name = data_bundle.idx_to_class[int(labels[i].item())]
+        ax.imshow(img)
+        ax.set_title(label_name)
+        ax.axis("off")
+
+    plt.tight_layout()
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=150)
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    cfg = DataConfig()
+    bundle = build_dataloaders(cfg)
+    print("Class mapping:", bundle.class_to_idx)
+    print(
+        f"Sizes -> train: {bundle.train_size}, val: {bundle.val_size}, test: {bundle.test_size}"
+    )
+    show_random_batch(bundle, output_path=Path("outputs") / "sample_train_batch.png")
+    print("Saved sample batch image to outputs/sample_train_batch.png")

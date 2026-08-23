@@ -1,0 +1,19 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Local datasets and artifacts
+data/
+outputs/
+checkpoints/
+*.pth
+*.pt
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE/OS
+.DS_Store
+Thumbs.db
