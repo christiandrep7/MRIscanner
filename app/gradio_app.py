@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import gradio as gr
@@ -122,6 +123,18 @@ def _ground_truth_message(true_label: str | None, labels_by_architecture: dict[s
     return f"🎯 True label: **{true_label}** -- {num_correct}/{len(predicted)} correct ({per_model})"
 
 
+def _predict_one(architecture: str, image: Image.Image, device: torch.device, num_threads: int):
+    # Each worker thread pins its own torch intra-op thread count so N models
+    # running concurrently split the machine's cores N ways instead of each
+    # one trying to claim all of them (oversubscription -- slower than serial,
+    # not faster). Only meaningful for CPU; a real CUDA/MPS device ignores it.
+    torch.set_num_threads(max(1, num_threads))
+    # CHECKPOINT_DIR read here (not as predict_with's default parameter) so a
+    # reconfigured CHECKPOINT_DIR is always honored -- default parameter
+    # values are bound once at function-definition time, not re-read per call.
+    return predict_with(architecture, image, device, checkpoint_dir=CHECKPOINT_DIR)
+
+
 def predict_all(image: Image.Image | None, selected_architectures: list[str], true_label: str | None = None) -> list:
     if image is None:
         outputs: list = []
@@ -130,15 +143,34 @@ def predict_all(image: Image.Image | None, selected_architectures: list[str], tr
         return ["No image uploaded.", *outputs]
 
     device = get_device()
+    selected = [a for a in ARCHITECTURES if a in selected_architectures]
+    # Split available cores across however many models are actually running
+    # concurrently this call -- selecting just 1 model still gets full-core
+    # torch performance, exactly like before this change.
+    cpu_count = os.cpu_count() or 1
+    threads_per_model = max(1, cpu_count // max(1, len(selected))) if device.type == "cpu" else cpu_count
+
+    results: dict[str, tuple[str, object]] = {}
+    if selected:
+        with ThreadPoolExecutor(max_workers=len(selected)) as executor:
+            futures = {
+                executor.submit(_predict_one, architecture, image, device, threads_per_model): architecture
+                for architecture in selected
+            }
+            for future in as_completed(futures):
+                architecture = futures[future]
+                results[architecture] = future.result()
+
+    # Torch's global thread count is process-wide state -- restore it for
+    # whatever runs next (a later single-model call, a benchmark run, etc.)
+    # now that this call's workers have all finished.
+    torch.set_num_threads(cpu_count)
+
     outputs = []
     labels_by_architecture: dict[str, str | None] = {}
     for architecture in ARCHITECTURES:
-        if architecture in selected_architectures:
-            # CHECKPOINT_DIR read here (not as predict_with's default parameter)
-            # so a reconfigured CHECKPOINT_DIR is always honored -- default
-            # parameter values are bound once at function-definition time, not
-            # re-read per call.
-            label, overlay = predict_with(architecture, image, device, checkpoint_dir=CHECKPOINT_DIR)
+        if architecture in results:
+            label, overlay = results[architecture]
             labels_by_architecture[architecture] = _label_only(label)
         else:
             label, overlay = "(not selected)", None

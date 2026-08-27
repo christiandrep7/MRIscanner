@@ -77,6 +77,38 @@ def test_predict_all_skips_unselected_architectures(all_fake_checkpoints: dict[s
             assert label == "(not selected)"
 
 
+def test_predict_all_runs_selected_models_concurrently(all_fake_checkpoints: dict[str, Path], monkeypatch):
+    """Regression test for the sequential-loop version: 3 models each pausing
+    briefly should overlap in wall-clock time, not add up serially."""
+    import threading
+    import time
+
+    checkpoint_dir = next(iter(all_fake_checkpoints.values())).parent
+    monkeypatch.setattr(gradio_app, "CHECKPOINT_DIR", checkpoint_dir)
+
+    starts: dict[str, float] = {}
+    lock = threading.Lock()
+
+    def fake_predict_with(architecture, image, device, checkpoint_dir=None):
+        with lock:
+            starts[architecture] = time.monotonic()
+        time.sleep(0.3)
+        return f"{architecture}-label", None
+
+    monkeypatch.setattr(gradio_app, "predict_with", fake_predict_with)
+
+    img = Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8))
+    t0 = time.monotonic()
+    gradio_app.predict_all(img, list(ARCHITECTURES))
+    elapsed = time.monotonic() - t0
+
+    # Serial would be >= 0.9s (3 x 0.3s); concurrent should land well under that.
+    assert elapsed < 0.7, f"expected concurrent execution, took {elapsed:.2f}s"
+    assert len(starts) == 3
+    spread = max(starts.values()) - min(starts.values())
+    assert spread < 0.2, f"model start times were {spread:.2f}s apart -- looks sequential, not concurrent"
+
+
 def test_run_benchmark_returns_table_and_chart(
     tiny_data_config, all_fake_checkpoints: dict[str, Path], tmp_path: Path, monkeypatch
 ):
