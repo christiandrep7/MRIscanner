@@ -12,8 +12,8 @@
     --text: #e8eaed;
     --muted: #9aa4b2;
     --accent: #ea580c;
-    --accent-soft: rgba(234, 88, 12, 0.15);
     --good: #22c55e;
+    --bad: #f87171;
   }
   * { box-sizing: border-box; }
   body {
@@ -25,7 +25,7 @@
     justify-content: center;
     padding: 40px 16px;
   }
-  main { width: 100%; max-width: 640px; }
+  main { width: 100%; max-width: 900px; }
   h1 { font-size: 1.6rem; margin-bottom: 4px; }
   p.subtitle { color: var(--muted); margin-top: 0; margin-bottom: 28px; line-height: 1.5; }
   .card {
@@ -47,9 +47,13 @@
   #drop img { max-width: 100%; max-height: 260px; border-radius: 8px; }
   #drop .placeholder { color: var(--muted); }
   input[type="file"] { display: none; }
+  .models-row { display: flex; gap: 20px; margin: 16px 0; flex-wrap: wrap; }
+  .models-row label {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    color: var(--text); font-size: 0.95rem;
+  }
   button {
-    width: 100%;
-    padding: 12px;
+    padding: 12px 20px;
     font-size: 1rem;
     font-weight: 600;
     border: none;
@@ -57,39 +61,29 @@
     background: var(--accent);
     color: white;
     cursor: pointer;
-    margin-top: 16px;
   }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  #result { margin-top: 8px; }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 8px 0;
+  #summary {
+    margin: 4px 0 20px 0;
+    font-size: 1.05rem;
+    line-height: 1.6;
   }
-  .row .name { width: 100px; font-size: 0.9rem; color: var(--muted); }
-  .row .bar-track {
-    flex: 1;
-    height: 10px;
-    background: var(--border);
-    border-radius: 6px;
-    overflow: hidden;
+  .models-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
   }
-  .row .bar-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 6px;
-    transition: width 0.4s ease;
+  .model-card {
+    background: #0f1216;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
   }
-  .row.top .bar-fill { background: var(--good); }
-  .row .pct { width: 54px; text-align: right; font-variant-numeric: tabular-nums; font-size: 0.9rem; }
-  .top-label {
-    font-size: 1.3rem;
-    font-weight: 700;
-    margin-bottom: 16px;
-  }
-  .top-label .conf { color: var(--good); }
-  .error { color: #f87171; }
+  .model-card h3 { margin: 0 0 8px 0; font-size: 0.95rem; color: var(--muted); }
+  .model-card .label { font-weight: 700; margin-bottom: 8px; }
+  .model-card img { width: 100%; border-radius: 8px; }
+  .status-line { color: var(--muted); font-size: 0.9rem; margin-top: 12px; }
+  .error { color: var(--bad); }
   footer { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 24px; line-height: 1.6; }
   footer a { color: var(--muted); }
   .spinner {
@@ -109,9 +103,9 @@
 <main>
   <h1>🧠 MRIscanner</h1>
   <p class="subtitle">
-    Brain tumor classification demo (glioma / meningioma / pituitary / no tumor),
-    running a EfficientNet-B0 model in your browser session via a serverless
-    ONNX Runtime function. <strong>Not a diagnostic tool.</strong>
+    Brain tumor classification (glioma / meningioma / pituitary / no tumor).
+    All inference runs on a dedicated EC2 backend -- this page is just the UI.
+    <strong>Not a diagnostic tool.</strong>
   </p>
 
   <div class="card">
@@ -120,16 +114,25 @@
       <img id="preview" style="display:none" />
     </div>
     <input type="file" id="fileInput" accept="image/*" />
+
+    <div class="models-row">
+      <label><input type="checkbox" value="resnet50" checked /> resnet50</label>
+      <label><input type="checkbox" value="efficientnet_b0" checked /> efficientnet_b0</label>
+      <label><input type="checkbox" value="vgg16" checked /> vgg16</label>
+    </div>
+
     <button id="predictBtn" disabled>Upload an image first</button>
+    <div class="status-line" id="statusLine"></div>
   </div>
 
   <div class="card" id="resultCard" style="display:none">
-    <div id="result"></div>
+    <div id="summary"></div>
+    <div class="models-grid" id="modelsGrid"></div>
   </div>
 
   <footer>
-    Model: EfficientNet-B0, trained on the Kaggle Brain Tumor MRI Dataset.
-    Held-out test accuracy: 92.7%.
+    Three architectures compared: ResNet50 (95.0% held-out accuracy),
+    VGG16 (94.2%), EfficientNet-B0 (92.7%).
     <br />Source: <a href="https://github.com/christiandrep7/MRIscanner">github.com/christiandrep7/MRIscanner</a>
   </footer>
 </main>
@@ -140,10 +143,14 @@ const fileInput = document.getElementById('fileInput');
 const preview = document.getElementById('preview');
 const placeholder = document.getElementById('placeholder');
 const predictBtn = document.getElementById('predictBtn');
+const statusLine = document.getElementById('statusLine');
 const resultCard = document.getElementById('resultCard');
-const resultDiv = document.getElementById('result');
+const summaryDiv = document.getElementById('summary');
+const modelsGrid = document.getElementById('modelsGrid');
+const modelCheckboxes = document.querySelectorAll('.models-row input[type="checkbox"]');
 
 let currentDataUrl = null;
+let pollTimer = null;
 
 drop.addEventListener('click', () => fileInput.click());
 drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
@@ -167,48 +174,90 @@ function handleFile(file) {
     predictBtn.disabled = false;
     predictBtn.textContent = 'Predict';
     resultCard.style.display = 'none';
+    statusLine.textContent = '';
   };
   reader.readAsDataURL(file);
 }
 
+function selectedArchitectures() {
+  return Array.from(modelCheckboxes).filter((c) => c.checked).map((c) => c.value);
+}
+
 predictBtn.addEventListener('click', async () => {
   if (!currentDataUrl) return;
+  const selected = selectedArchitectures();
+  if (selected.length === 0) {
+    statusLine.innerHTML = '<span class="error">Pick at least one model.</span>';
+    return;
+  }
+
   predictBtn.disabled = true;
-  predictBtn.innerHTML = '<span class="spinner"></span>Predicting...';
+  predictBtn.innerHTML = '<span class="spinner"></span>Starting...';
   resultCard.style.display = 'none';
+  if (pollTimer) clearTimeout(pollTimer);
 
   try {
-    const res = await fetch('/api/predict', {
+    const startRes = await fetch('/api/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: currentDataUrl }),
+      body: JSON.stringify({ image: currentDataUrl, selected_architectures: selected }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Prediction failed');
-    renderResult(data);
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error || 'Failed to start prediction');
+
+    statusLine.textContent = 'Running on EC2 -- a full multi-model pass can take a minute or more...';
+    pollJob(startData.job_id);
   } catch (err) {
-    resultDiv.innerHTML = `<p class="error">Error: ${err.message}</p>`;
-    resultCard.style.display = 'block';
-  } finally {
-    predictBtn.disabled = false;
-    predictBtn.textContent = 'Predict';
+    statusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+    resetButton();
   }
 });
 
-function renderResult(data) {
-  const entries = Object.entries(data.probabilities).sort((a, b) => b[1] - a[1]);
-  let html = `<div class="top-label">${data.label} <span class="conf">(${(data.confidence * 100).toFixed(1)}%)</span></div>`;
-  for (const [name, prob] of entries) {
-    const pct = (prob * 100).toFixed(1);
-    const isTop = name === data.label;
-    html += `
-      <div class="row ${isTop ? 'top' : ''}">
-        <div class="name">${name}</div>
-        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-        <div class="pct">${pct}%</div>
-      </div>`;
+async function pollJob(jobId) {
+  try {
+    const res = await fetch(`/api/predict?job_id=${encodeURIComponent(jobId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Polling failed');
+
+    if (data.status === 'running') {
+      pollTimer = setTimeout(() => pollJob(jobId), 3000);
+      return;
+    }
+    if (data.status === 'done') {
+      renderResult(data.result);
+      resetButton();
+      return;
+    }
+    if (data.status === 'not_found') {
+      throw new Error('Job expired or unknown -- try again');
+    }
+    throw new Error(data.error || 'Prediction failed on the backend');
+  } catch (err) {
+    statusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+    resetButton();
   }
-  resultDiv.innerHTML = html;
+}
+
+function resetButton() {
+  predictBtn.disabled = false;
+  predictBtn.textContent = 'Predict';
+}
+
+function renderResult(result) {
+  statusLine.textContent = '';
+  summaryDiv.innerHTML = (result.summary || '').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  const architectures = ['resnet50', 'efficientnet_b0', 'vgg16'];
+  modelsGrid.innerHTML = '';
+  architectures.forEach((arch, i) => {
+    const model = result.models[i];
+    const card = document.createElement('div');
+    card.className = 'model-card';
+    const overlayImg = model.overlay ? `<img src="${model.overlay}" alt="Grad-CAM heatmap" />` : '';
+    card.innerHTML = `<h3>${arch}</h3><div class="label">${model.label}</div>${overlayImg}`;
+    modelsGrid.appendChild(card);
+  });
+
   resultCard.style.display = 'block';
 }
 </script>

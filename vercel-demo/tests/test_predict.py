@@ -1,51 +1,137 @@
-"""Lightweight tests for the Vercel serverless function's inference logic.
-No torch here on purpose -- this mirrors what's actually deployed (onnxruntime
-+ numpy + Pillow only), so it tests the real deployed code path, not a proxy."""
+"""Tests for the Vercel relay function. It has no ML logic of its own --
+everything here is about correctly forwarding to (and relaying failures from)
+the EC2 compute backend, since that's the entire job of this file now."""
 from __future__ import annotations
 
+import io
+import json
 import sys
+import threading
+from http.server import HTTPServer
 from pathlib import Path
-
-import numpy as np
-import pytest
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 import predict as p  # noqa: E402
 
 
-def _synthetic_image(size: int = 96) -> Image.Image:
-    arr = np.random.default_rng(0).integers(0, 256, size=(size, size, 3), dtype=np.uint8)
-    return Image.fromarray(arr, mode="RGB")
+class _FakeUpstreamHandler:
+    """A tiny real HTTP server standing in for the EC2 backend, so tests
+    exercise predict.py's actual urllib calls instead of mocking them away."""
+
+    def __init__(self, response_body: dict, status: int = 200):
+        self.response_body = response_body
+        self.status = status
+        self.received_path = None
+        self.received_body = None
 
 
-def test_model_file_exists():
-    assert Path(p._MODEL_PATH).is_file()
+def _start_fake_upstream(fake: _FakeUpstreamHandler) -> tuple[HTTPServer, int]:
+    from http.server import BaseHTTPRequestHandler
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            fake.received_body = json.loads(self.rfile.read(length) or b"{}")
+            fake.received_path = self.path
+            self.send_response(fake.status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(fake.response_body).encode())
+
+        def do_GET(self):
+            fake.received_path = self.path
+            self.send_response(fake.status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(fake.response_body).encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
 
 
-def test_preprocess_shape_and_dtype():
-    x = p.preprocess(_synthetic_image(64))
-    assert x.shape == (1, 3, p.IMAGE_SIZE, p.IMAGE_SIZE)
-    assert x.dtype == np.float32
+class _FakeRequestHandler(p.handler):
+    """Bypasses BaseHTTPRequestHandler's socket-based __init__ so do_POST/do_GET
+    can be invoked directly in a test with a controlled request body/path."""
+
+    def __init__(self, body: bytes = b"", path: str = "/"):
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.headers = {"Content-Length": str(len(body))}
+        self.path = path
+        self._responses: list[tuple[int, dict]] = []
+
+    def send_response(self, status):
+        self._status = status
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def log_message(self, *args):
+        pass
 
 
-def test_preprocess_handles_grayscale_input():
-    gray = Image.fromarray(np.zeros((50, 50), dtype=np.uint8), mode="L")
-    x = p.preprocess(gray)
-    assert x.shape == (1, 3, p.IMAGE_SIZE, p.IMAGE_SIZE)
+def test_predict_post_relays_to_upstream_and_returns_job_id(monkeypatch):
+    fake = _FakeUpstreamHandler({"job_id": "abc-123"})
+    server, port = _start_fake_upstream(fake)
+    monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
+
+    body = json.dumps({"image": "xyz", "selected_architectures": ["resnet50"]}).encode()
+    h = _FakeRequestHandler(body=body)
+    h.do_POST()
+
+    assert h._status == 200
+    assert json.loads(h.wfile.getvalue()) == {"job_id": "abc-123"}
+    assert fake.received_path == "/api/jobs/predict"
+    assert fake.received_body == {"image": "xyz", "selected_architectures": ["resnet50"]}
+    server.shutdown()
 
 
-def test_softmax_sums_to_one_and_matches_argmax():
-    logits = np.array([2.0, 1.0, 0.1, -1.0], dtype=np.float32)
-    probs = p.softmax(logits)
-    assert probs.sum() == pytest.approx(1.0, abs=1e-6)
-    assert np.argmax(probs) == np.argmax(logits)
+def test_predict_get_relays_job_id_from_query_string(monkeypatch):
+    fake = _FakeUpstreamHandler({"status": "done", "result": {"summary": "ok", "models": []}})
+    server, port = _start_fake_upstream(fake)
+    monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
+
+    h = _FakeRequestHandler(path="/api/predict?job_id=abc-123")
+    h.do_GET()
+
+    assert h._status == 200
+    assert json.loads(h.wfile.getvalue())["status"] == "done"
+    assert fake.received_path == "/api/jobs/abc-123"
+    server.shutdown()
 
 
-def test_predict_end_to_end_returns_valid_result():
-    result = p.predict(_synthetic_image())
-    assert result["label"] in p.CLASS_NAMES
-    assert 0.0 <= result["confidence"] <= 1.0
-    assert set(result["probabilities"]) == set(p.CLASS_NAMES)
-    assert sum(result["probabilities"].values()) == pytest.approx(1.0, abs=1e-4)
-    assert result["probabilities"][result["label"]] == result["confidence"]
+def test_predict_get_missing_job_id_returns_400():
+    h = _FakeRequestHandler(path="/api/predict")
+    h.do_GET()
+
+    assert h._status == 400
+    assert "error" in json.loads(h.wfile.getvalue())
+
+
+def test_predict_post_returns_502_when_upstream_unreachable(monkeypatch):
+    monkeypatch.setattr(p, "EC2_BASE_URL", "http://127.0.0.1:1")  # nothing listens here
+
+    h = _FakeRequestHandler(body=json.dumps({"image": "xyz"}).encode())
+    h.do_POST()
+
+    assert h._status == 502
+    assert "error" in json.loads(h.wfile.getvalue())
+
+
+def test_predict_get_returns_502_when_upstream_unreachable(monkeypatch):
+    monkeypatch.setattr(p, "EC2_BASE_URL", "http://127.0.0.1:1")
+
+    h = _FakeRequestHandler(path="/api/predict?job_id=abc-123")
+    h.do_GET()
+
+    assert h._status == 502
+    assert "error" in json.loads(h.wfile.getvalue())

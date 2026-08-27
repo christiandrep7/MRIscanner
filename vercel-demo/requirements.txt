@@ -1,3 +1,2 @@
-onnxruntime==1.19.2
-numpy==1.26.4
-Pillow==11.0.0
+# Intentionally empty: api/predict.py is a pure-stdlib relay to the EC2
+# compute backend (json, http.server, urllib only). See README.md.

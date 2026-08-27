@@ -20,3 +20,8 @@ checkpoints/
 .DS_Store
 Thumbs.db
 .grepai/
+
+# Claude Code / agent tooling (machine-local, not part of the project)
+.claude/
+.claudeignore
+brain/
