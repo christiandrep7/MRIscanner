@@ -144,15 +144,28 @@ def predict_all(image: Image.Image | None, selected_architectures: list[str], tr
 
     device = get_device()
     selected = [a for a in ARCHITECTURES if a in selected_architectures]
+
+    # Concurrency is genuinely faster only when the machine has enough RAM to
+    # hold every concurrently-running model's memory footprint at once --
+    # measured on the 908MB free-tier EC2 instance this project deploys to,
+    # 3 models running at once OOM-kills the process, swap or no swap.
+    # MAX_CONCURRENT_PREDICT_WORKERS caps how many run in parallel per call so
+    # a memory-constrained deployment can dial this down (1 = fully
+    # sequential, the safe default absent better evidence) without touching
+    # code; a bigger instance can raise it to get the real speedup.
+    max_workers = int(os.environ.get("MAX_CONCURRENT_PREDICT_WORKERS", len(selected) or 1))
+    max_workers = max(1, min(max_workers, len(selected) or 1))
+
     # Split available cores across however many models are actually running
-    # concurrently this call -- selecting just 1 model still gets full-core
-    # torch performance, exactly like before this change.
+    # concurrently this call -- selecting just 1 model (or a max_workers=1
+    # cap) still gets full-core torch performance, exactly like before this
+    # change.
     cpu_count = os.cpu_count() or 1
-    threads_per_model = max(1, cpu_count // max(1, len(selected))) if device.type == "cpu" else cpu_count
+    threads_per_model = max(1, cpu_count // max_workers) if device.type == "cpu" else cpu_count
 
     results: dict[str, tuple[str, object]] = {}
     if selected:
-        with ThreadPoolExecutor(max_workers=len(selected)) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(_predict_one, architecture, image, device, threads_per_model): architecture
                 for architecture in selected

@@ -109,6 +109,40 @@ def test_predict_all_runs_selected_models_concurrently(all_fake_checkpoints: dic
     assert spread < 0.2, f"model start times were {spread:.2f}s apart -- looks sequential, not concurrent"
 
 
+def test_predict_all_respects_max_concurrent_workers_cap(
+    all_fake_checkpoints: dict[str, Path], monkeypatch
+):
+    """MAX_CONCURRENT_PREDICT_WORKERS=1 must make execution fully sequential --
+    this is the real safety valve for memory-constrained deployments (see the
+    comment in predict_all: 3-at-once OOM-killed the actual EC2 deployment)."""
+    import threading
+    import time
+
+    checkpoint_dir = next(iter(all_fake_checkpoints.values())).parent
+    monkeypatch.setattr(gradio_app, "CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setenv("MAX_CONCURRENT_PREDICT_WORKERS", "1")
+
+    starts: dict[str, float] = {}
+    lock = threading.Lock()
+
+    def fake_predict_with(architecture, image, device, checkpoint_dir=None):
+        with lock:
+            starts[architecture] = time.monotonic()
+        time.sleep(0.2)
+        return f"{architecture}-label", None
+
+    monkeypatch.setattr(gradio_app, "predict_with", fake_predict_with)
+
+    img = Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8))
+    t0 = time.monotonic()
+    gradio_app.predict_all(img, list(ARCHITECTURES))
+    elapsed = time.monotonic() - t0
+
+    # Capped to 1 worker -> genuinely sequential: >= 3 x 0.2s.
+    assert elapsed >= 0.55, f"expected sequential execution under the cap, took only {elapsed:.2f}s"
+    assert len(starts) == 3
+
+
 def test_run_benchmark_returns_table_and_chart(
     tiny_data_config, all_fake_checkpoints: dict[str, Path], tmp_path: Path, monkeypatch
 ):
