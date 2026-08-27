@@ -48,11 +48,13 @@ def _set_job(job_id: str, **fields: Any) -> None:
         _jobs[job_id].update(fields)
 
 
-def _run_predict_job(job_id: str, image: Image.Image, selected_architectures: list[str]) -> None:
+def _run_predict_job(
+    job_id: str, image: Image.Image, selected_architectures: list[str], true_label: str | None = None
+) -> None:
     from app.gradio_app import predict_all
 
     try:
-        outputs = predict_all(image, selected_architectures)
+        outputs = predict_all(image, selected_architectures, true_label)
         summary = outputs[0]
         per_model = []
         pairs = outputs[1:]
@@ -95,11 +97,14 @@ def attach_async_routes(app) -> None:
         except Exception as e:
             return JSONResponse(status_code=400, content={"error": f"invalid image data: {e}"})
         selected = payload.get("selected_architectures") or ["resnet50", "efficientnet_b0", "vgg16"]
+        true_label = payload.get("true_label")
 
         job_id = str(uuid.uuid4())
         with _lock:
             _jobs[job_id] = {"status": "running", "created": time.monotonic()}
-        threading.Thread(target=_run_predict_job, args=(job_id, image, selected), daemon=True).start()
+        threading.Thread(
+            target=_run_predict_job, args=(job_id, image, selected, true_label), daemon=True
+        ).start()
         return {"job_id": job_id}
 
     @app.post("/api/jobs/benchmark")
@@ -120,3 +125,20 @@ def attach_async_routes(app) -> None:
         if job is None:
             return {"status": "not_found"}
         return {k: v for k, v in job.items() if k != "created"}
+
+    @app.get("/api/random-scan")
+    def random_scan():
+        # Fast (pick a file + base64-encode it) -- no background job needed,
+        # unlike predict/benchmark which can take minutes.
+        from app.gradio_app import pick_random_test_image
+
+        image, true_label = pick_random_test_image()
+        if image is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "no test dataset on this server (data/Testing missing)"},
+            )
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        return {"image": data_url, "true_label": true_label}

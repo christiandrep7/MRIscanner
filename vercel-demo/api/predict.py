@@ -1,12 +1,17 @@
 """Vercel serverless function: thin relay to the EC2-hosted async job API.
 
-All actual compute (all 3 models, Grad-CAM) runs on EC2 -- a full 3-model run
-can take well over a minute on that instance's constrained hardware, which is
+All actual compute (all 3 models, Grad-CAM, benchmark) runs on EC2 -- a full
+run can take well over a minute on that instance's constrained hardware,
 longer than Vercel's serverless function timeout allows for a single request.
-So this relays to /api/jobs/predict (returns instantly with a job_id) and
-/api/jobs/{job_id} (polled by the frontend every couple seconds) rather than
-holding one request open for the whole run. No torch/onnx/numpy here at all --
-this file only ever forwards JSON.
+So POSTs start a background job on EC2 and return instantly with a job_id;
+GETs (polled by the frontend every few seconds) check that job's status.
+No torch/onnx/numpy here at all -- this file only ever forwards JSON.
+
+Routing (single entrypoint handles everything under /api/predict):
+  POST {job_type: "predict", ...}   -> EC2 /api/jobs/predict
+  POST {job_type: "benchmark", ...} -> EC2 /api/jobs/benchmark
+  GET  ?job_id=...                  -> EC2 /api/jobs/{job_id}  (poll, either job type)
+  GET  ?random=1                    -> EC2 /api/random-scan    (synchronous, not a job)
 """
 from __future__ import annotations
 
@@ -16,7 +21,18 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 EC2_BASE_URL = "http://3.145.114.146:7860"
-_TIMEOUT_SECONDS = 15  # relay calls are instant (submit) or instant (poll) -- never the long compute itself
+_TIMEOUT_SECONDS = 15  # relay calls are instant (submit/poll/random) -- never the long compute itself
+
+
+def _relay(url: str, *, data: bytes | None = None) -> tuple[int, dict]:
+    req = Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method="POST" if data is not None else "GET",
+    )
+    with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+        return resp.status, json.loads(resp.read())
 
 
 class handler(BaseHTTPRequestHandler):
@@ -24,14 +40,10 @@ class handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) or b"{}"
-            req = Request(
-                f"{EC2_BASE_URL}/api/jobs/predict",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
-                self._send_json(resp.status, json.loads(resp.read()))
+            job_type = json.loads(body).get("job_type", "predict")
+            endpoint = "benchmark" if job_type == "benchmark" else "predict"
+            status, payload = _relay(f"{EC2_BASE_URL}/api/jobs/{endpoint}", data=body)
+            self._send_json(status, payload)
         except Exception as e:  # noqa: BLE001 -- surfaced to the caller, not swallowed
             self._send_json(502, {"error": f"could not reach compute backend: {e}"})
 
@@ -39,11 +51,16 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(urlparse(self.path).query)
             job_id = query.get("job_id", [None])[0]
-            if not job_id:
-                self._send_json(400, {"error": "missing job_id query parameter"})
+            is_random = query.get("random", [None])[0]
+
+            if job_id:
+                status, payload = _relay(f"{EC2_BASE_URL}/api/jobs/{job_id}")
+            elif is_random:
+                status, payload = _relay(f"{EC2_BASE_URL}/api/random-scan")
+            else:
+                self._send_json(400, {"error": "expected a job_id or random query parameter"})
                 return
-            with urlopen(f"{EC2_BASE_URL}/api/jobs/{job_id}", timeout=_TIMEOUT_SECONDS) as resp:
-                self._send_json(resp.status, json.loads(resp.read()))
+            self._send_json(status, payload)
         except Exception as e:  # noqa: BLE001
             self._send_json(502, {"error": f"could not reach compute backend: {e}"})
 

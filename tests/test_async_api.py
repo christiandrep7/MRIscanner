@@ -86,6 +86,57 @@ def test_predict_job_reports_error_for_bad_image_data():
     assert "error" in resp.json()
 
 
+def test_predict_job_with_true_label_marks_ground_truth(monkeypatch, fake_checkpoint: Path):
+    import app.gradio_app as gradio_app
+
+    monkeypatch.setattr(gradio_app, "CHECKPOINT_DIR", fake_checkpoint.parent)
+
+    client = _make_client()
+    image = Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8), mode="RGB")
+    payload = {
+        "image": _image_to_b64(image),
+        "selected_architectures": ["resnet50"],
+        "true_label": "glioma",
+    }
+
+    start_resp = client.post("/api/jobs/predict", json=payload)
+    job_id = start_resp.json()["job_id"]
+
+    result = _poll_until_done(client, job_id)
+    assert result["status"] == "done"
+    # Only 1 model selected -> _ground_truth_message requires 2+ predictions to
+    # say anything, so this just confirms the parameter reaches predict_all
+    # without erroring; the multi-model case is covered by test_gradio_app.py.
+    assert result["result"]["summary"] == "" or "True label" in result["result"]["summary"]
+
+
+def test_random_scan_returns_image_and_true_label(monkeypatch):
+    import app.gradio_app as gradio_app
+
+    fake_image = Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8), mode="RGB")
+    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda: (fake_image, "meningioma"))
+
+    client = _make_client()
+    resp = client.get("/api/random-scan")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["true_label"] == "meningioma"
+    assert body["image"].startswith("data:image/png;base64,")
+
+
+def test_random_scan_404_when_no_dataset(monkeypatch):
+    import app.gradio_app as gradio_app
+
+    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda: (None, None))
+
+    client = _make_client()
+    resp = client.get("/api/random-scan")
+
+    assert resp.status_code == 404
+    assert "error" in resp.json()
+
+
 def test_benchmark_job_end_to_end(monkeypatch, tiny_data_config, all_fake_checkpoints):
     import app.gradio_app as gradio_app
 

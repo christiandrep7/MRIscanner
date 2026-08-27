@@ -6,14 +6,15 @@
 <title>MRIscanner — Brain Tumor Classifier</title>
 <style>
   :root {
-    --bg: #0b0d10;
-    --panel: #14171c;
-    --border: #262b33;
-    --text: #e8eaed;
-    --muted: #9aa4b2;
-    --accent: #ea580c;
-    --good: #22c55e;
-    --bad: #f87171;
+    --bg: #f5f8fc;
+    --panel: #ffffff;
+    --border: #d9e2ec;
+    --text: #10253e;
+    --muted: #5b7186;
+    --accent: #2563eb;
+    --accent-dark: #1d4ed8;
+    --good: #16a34a;
+    --bad: #dc2626;
   }
   * { box-sizing: border-box; }
   body {
@@ -25,15 +26,24 @@
     justify-content: center;
     padding: 40px 16px;
   }
-  main { width: 100%; max-width: 900px; }
+  main { width: 100%; max-width: 920px; }
   h1 { font-size: 1.6rem; margin-bottom: 4px; }
-  p.subtitle { color: var(--muted); margin-top: 0; margin-bottom: 28px; line-height: 1.5; }
+  p.subtitle { color: var(--muted); margin-top: 0; margin-bottom: 24px; line-height: 1.5; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 2px solid var(--border); }
+  .tab-btn {
+    background: none; border: none; padding: 10px 18px; font-size: 0.95rem; font-weight: 600;
+    color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 24px;
     margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(16, 37, 62, 0.06);
   }
   #drop {
     border: 2px dashed var(--border);
@@ -42,6 +52,7 @@
     text-align: center;
     cursor: pointer;
     transition: border-color 0.15s;
+    background: #fafcff;
   }
   #drop:hover, #drop.dragover { border-color: var(--accent); }
   #drop img { max-width: 100%; max-height: 260px; border-radius: 8px; }
@@ -52,6 +63,7 @@
     display: flex; align-items: center; gap: 8px; cursor: pointer;
     color: var(--text); font-size: 0.95rem;
   }
+  .button-row { display: flex; gap: 12px; flex-wrap: wrap; }
   button {
     padding: 12px 20px;
     font-size: 1rem;
@@ -62,8 +74,11 @@
     color: white;
     cursor: pointer;
   }
+  button:hover:not(:disabled) { background: var(--accent-dark); }
+  button.secondary { background: #eef2f9; color: var(--accent-dark); }
+  button.secondary:hover:not(:disabled) { background: #dfe8f5; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  #summary {
+  #summary, #benchSummary {
     margin: 4px 0 20px 0;
     font-size: 1.05rem;
     line-height: 1.6;
@@ -74,7 +89,7 @@
     gap: 16px;
   }
   .model-card {
-    background: #0f1216;
+    background: #fafcff;
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px;
@@ -84,12 +99,16 @@
   .model-card img { width: 100%; border-radius: 8px; }
   .status-line { color: var(--muted); font-size: 0.9rem; margin-top: 12px; }
   .error { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  #benchChart { max-width: 100%; margin-top: 16px; border-radius: 8px; }
   footer { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 24px; line-height: 1.6; }
-  footer a { color: var(--muted); }
+  footer a { color: var(--accent); }
   .spinner {
     display: inline-block;
     width: 16px; height: 16px;
-    border: 2px solid rgba(255,255,255,0.3);
+    border: 2px solid rgba(255,255,255,0.4);
     border-top-color: white;
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
@@ -108,26 +127,59 @@
     <strong>Not a diagnostic tool.</strong>
   </p>
 
-  <div class="card">
-    <div id="drop">
-      <div class="placeholder" id="placeholder">Click or drop an MRI scan here</div>
-      <img id="preview" style="display:none" />
-    </div>
-    <input type="file" id="fileInput" accept="image/*" />
-
-    <div class="models-row">
-      <label><input type="checkbox" value="resnet50" checked /> resnet50</label>
-      <label><input type="checkbox" value="efficientnet_b0" checked /> efficientnet_b0</label>
-      <label><input type="checkbox" value="vgg16" checked /> vgg16</label>
-    </div>
-
-    <button id="predictBtn" disabled>Upload an image first</button>
-    <div class="status-line" id="statusLine"></div>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="predict">Predict</button>
+    <button class="tab-btn" data-tab="benchmark">Benchmark</button>
   </div>
 
-  <div class="card" id="resultCard" style="display:none">
-    <div id="summary"></div>
-    <div class="models-grid" id="modelsGrid"></div>
+  <div class="tab-panel active" id="tab-predict">
+    <div class="card">
+      <div id="drop">
+        <div class="placeholder" id="placeholder">Click or drop an MRI scan here</div>
+        <img id="preview" style="display:none" />
+      </div>
+      <input type="file" id="fileInput" accept="image/*" />
+
+      <div class="models-row">
+        <label><input type="checkbox" class="predict-model" value="resnet50" checked /> resnet50</label>
+        <label><input type="checkbox" class="predict-model" value="efficientnet_b0" checked /> efficientnet_b0</label>
+        <label><input type="checkbox" class="predict-model" value="vgg16" checked /> vgg16</label>
+      </div>
+
+      <div class="button-row">
+        <button id="predictBtn" disabled>Upload an image first</button>
+        <button id="randomBtn" class="secondary">🎲 Try a random never-seen scan</button>
+      </div>
+      <div class="status-line" id="statusLine"></div>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none">
+      <div id="summary"></div>
+      <div class="models-grid" id="modelsGrid"></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-benchmark">
+    <div class="card">
+      <p style="color: var(--muted); margin-top: 0;">
+        Runs the selected model(s) against the full held-out test set (1600 scans
+        none of them were trained on or used for checkpoint selection). Can take
+        a few minutes.
+      </p>
+      <div class="models-row">
+        <label><input type="checkbox" class="bench-model" value="resnet50" checked /> resnet50</label>
+        <label><input type="checkbox" class="bench-model" value="efficientnet_b0" checked /> efficientnet_b0</label>
+        <label><input type="checkbox" class="bench-model" value="vgg16" checked /> vgg16</label>
+      </div>
+      <button id="benchmarkBtn">Run Benchmark</button>
+      <div class="status-line" id="benchStatusLine"></div>
+    </div>
+
+    <div class="card" id="benchResultCard" style="display:none">
+      <div id="benchSummary"></div>
+      <table id="benchTable"></table>
+      <img id="benchChart" style="display:none" />
+    </div>
   </div>
 
   <footer>
@@ -138,18 +190,30 @@
 </main>
 
 <script>
+// ---------- Tabs ----------
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+// ---------- Predict tab ----------
 const drop = document.getElementById('drop');
 const fileInput = document.getElementById('fileInput');
 const preview = document.getElementById('preview');
 const placeholder = document.getElementById('placeholder');
 const predictBtn = document.getElementById('predictBtn');
+const randomBtn = document.getElementById('randomBtn');
 const statusLine = document.getElementById('statusLine');
 const resultCard = document.getElementById('resultCard');
 const summaryDiv = document.getElementById('summary');
 const modelsGrid = document.getElementById('modelsGrid');
-const modelCheckboxes = document.querySelectorAll('.models-row input[type="checkbox"]');
 
 let currentDataUrl = null;
+let currentTrueLabel = null;
 let pollTimer = null;
 
 drop.addEventListener('click', () => fileInput.click());
@@ -164,10 +228,11 @@ fileInput.addEventListener('change', () => {
   if (fileInput.files.length) handleFile(fileInput.files[0]);
 });
 
-function handleFile(file) {
+function handleFile(file, trueLabel = null) {
   const reader = new FileReader();
   reader.onload = (e) => {
     currentDataUrl = e.target.result;
+    currentTrueLabel = trueLabel;
     preview.src = currentDataUrl;
     preview.style.display = 'block';
     placeholder.style.display = 'none';
@@ -179,13 +244,38 @@ function handleFile(file) {
   reader.readAsDataURL(file);
 }
 
-function selectedArchitectures() {
-  return Array.from(modelCheckboxes).filter((c) => c.checked).map((c) => c.value);
+function selectedModels(cls) {
+  return Array.from(document.querySelectorAll(`.${cls}:checked`)).map((c) => c.value);
 }
+
+randomBtn.addEventListener('click', async () => {
+  randomBtn.disabled = true;
+  randomBtn.innerHTML = '<span class="spinner"></span>Fetching...';
+  try {
+    const res = await fetch('/api/predict?random=1');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not fetch a random scan');
+
+    currentDataUrl = data.image;
+    currentTrueLabel = data.true_label;
+    preview.src = currentDataUrl;
+    preview.style.display = 'block';
+    placeholder.style.display = 'none';
+    predictBtn.disabled = false;
+    predictBtn.textContent = 'Predict';
+    resultCard.style.display = 'none';
+    statusLine.textContent = `Loaded a scan the models have never trained on (true label hidden until you predict).`;
+  } catch (err) {
+    statusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+  } finally {
+    randomBtn.disabled = false;
+    randomBtn.textContent = '🎲 Try a random never-seen scan';
+  }
+});
 
 predictBtn.addEventListener('click', async () => {
   if (!currentDataUrl) return;
-  const selected = selectedArchitectures();
+  const selected = selectedModels('predict-model');
   if (selected.length === 0) {
     statusLine.innerHTML = '<span class="error">Pick at least one model.</span>';
     return;
@@ -200,7 +290,12 @@ predictBtn.addEventListener('click', async () => {
     const startRes = await fetch('/api/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: currentDataUrl, selected_architectures: selected }),
+      body: JSON.stringify({
+        job_type: 'predict',
+        image: currentDataUrl,
+        selected_architectures: selected,
+        true_label: currentTrueLabel,
+      }),
     });
     const startData = await startRes.json();
     if (!startRes.ok) throw new Error(startData.error || 'Failed to start prediction');
@@ -209,7 +304,7 @@ predictBtn.addEventListener('click', async () => {
     pollJob(startData.job_id);
   } catch (err) {
     statusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
-    resetButton();
+    resetPredictButton();
   }
 });
 
@@ -225,7 +320,7 @@ async function pollJob(jobId) {
     }
     if (data.status === 'done') {
       renderResult(data.result);
-      resetButton();
+      resetPredictButton();
       return;
     }
     if (data.status === 'not_found') {
@@ -234,11 +329,11 @@ async function pollJob(jobId) {
     throw new Error(data.error || 'Prediction failed on the backend');
   } catch (err) {
     statusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
-    resetButton();
+    resetPredictButton();
   }
 }
 
-function resetButton() {
+function resetPredictButton() {
   predictBtn.disabled = false;
   predictBtn.textContent = 'Predict';
 }
@@ -259,6 +354,92 @@ function renderResult(result) {
   });
 
   resultCard.style.display = 'block';
+}
+
+// ---------- Benchmark tab ----------
+const benchmarkBtn = document.getElementById('benchmarkBtn');
+const benchStatusLine = document.getElementById('benchStatusLine');
+const benchResultCard = document.getElementById('benchResultCard');
+const benchSummary = document.getElementById('benchSummary');
+const benchTable = document.getElementById('benchTable');
+const benchChart = document.getElementById('benchChart');
+let benchPollTimer = null;
+
+benchmarkBtn.addEventListener('click', async () => {
+  const selected = selectedModels('bench-model');
+  if (selected.length === 0) {
+    benchStatusLine.innerHTML = '<span class="error">Pick at least one model.</span>';
+    return;
+  }
+
+  benchmarkBtn.disabled = true;
+  benchmarkBtn.innerHTML = '<span class="spinner"></span>Starting...';
+  benchResultCard.style.display = 'none';
+  if (benchPollTimer) clearTimeout(benchPollTimer);
+
+  try {
+    const startRes = await fetch('/api/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_type: 'benchmark', selected_architectures: selected }),
+    });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error || 'Failed to start benchmark');
+
+    benchStatusLine.textContent = 'Evaluating on 1600 held-out scans -- this can take several minutes...';
+    pollBenchmarkJob(startData.job_id);
+  } catch (err) {
+    benchStatusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+    resetBenchmarkButton();
+  }
+});
+
+async function pollBenchmarkJob(jobId) {
+  try {
+    const res = await fetch(`/api/predict?job_id=${encodeURIComponent(jobId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Polling failed');
+
+    if (data.status === 'running') {
+      benchPollTimer = setTimeout(() => pollBenchmarkJob(jobId), 5000);
+      return;
+    }
+    if (data.status === 'done') {
+      renderBenchmarkResult(data.result);
+      resetBenchmarkButton();
+      return;
+    }
+    throw new Error(data.error || 'Benchmark failed on the backend');
+  } catch (err) {
+    benchStatusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+    resetBenchmarkButton();
+  }
+}
+
+function resetBenchmarkButton() {
+  benchmarkBtn.disabled = false;
+  benchmarkBtn.textContent = 'Run Benchmark';
+}
+
+function renderBenchmarkResult(result) {
+  benchStatusLine.textContent = '';
+  benchSummary.textContent = `${result.rows.length} model(s) evaluated on the held-out test set:`;
+
+  const headers = ['Architecture', 'Accuracy', 'Macro F1', 'Params', 'ms/image (or error)'];
+  let html = '<tr>' + headers.map((h) => `<th>${h}</th>`).join('') + '</tr>';
+  for (const row of result.rows) {
+    html += '<tr>' + row.map((cell) => `<td>${cell}</td>`).join('') + '</tr>';
+  }
+  benchTable.innerHTML = html;
+
+  if (result.chart) {
+    benchChart.src = result.chart;
+    benchChart.style.display = 'block';
+  } else {
+    benchChart.style.display = 'none';
+  }
+
+  benchResultCard.style.display = 'block';
 }
 </script>
 </body>

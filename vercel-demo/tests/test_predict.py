@@ -79,7 +79,7 @@ class _FakeRequestHandler(p.handler):
         pass
 
 
-def test_predict_post_relays_to_upstream_and_returns_job_id(monkeypatch):
+def test_predict_post_relays_to_predict_endpoint_by_default(monkeypatch):
     fake = _FakeUpstreamHandler({"job_id": "abc-123"})
     server, port = _start_fake_upstream(fake)
     monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
@@ -95,7 +95,21 @@ def test_predict_post_relays_to_upstream_and_returns_job_id(monkeypatch):
     server.shutdown()
 
 
-def test_predict_get_relays_job_id_from_query_string(monkeypatch):
+def test_predict_post_with_job_type_benchmark_relays_to_benchmark_endpoint(monkeypatch):
+    fake = _FakeUpstreamHandler({"job_id": "bench-1"})
+    server, port = _start_fake_upstream(fake)
+    monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
+
+    body = json.dumps({"job_type": "benchmark", "selected_architectures": ["vgg16"]}).encode()
+    h = _FakeRequestHandler(body=body)
+    h.do_POST()
+
+    assert h._status == 200
+    assert fake.received_path == "/api/jobs/benchmark"
+    server.shutdown()
+
+
+def test_predict_get_with_job_id_polls_job_status(monkeypatch):
     fake = _FakeUpstreamHandler({"status": "done", "result": {"summary": "ok", "models": []}})
     server, port = _start_fake_upstream(fake)
     monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
@@ -109,7 +123,21 @@ def test_predict_get_relays_job_id_from_query_string(monkeypatch):
     server.shutdown()
 
 
-def test_predict_get_missing_job_id_returns_400():
+def test_predict_get_with_random_relays_to_random_scan_endpoint(monkeypatch):
+    fake = _FakeUpstreamHandler({"image": "data:image/png;base64,abc", "true_label": "glioma"})
+    server, port = _start_fake_upstream(fake)
+    monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
+
+    h = _FakeRequestHandler(path="/api/predict?random=1")
+    h.do_GET()
+
+    assert h._status == 200
+    assert json.loads(h.wfile.getvalue())["true_label"] == "glioma"
+    assert fake.received_path == "/api/random-scan"
+    server.shutdown()
+
+
+def test_predict_get_missing_query_params_returns_400():
     h = _FakeRequestHandler(path="/api/predict")
     h.do_GET()
 
