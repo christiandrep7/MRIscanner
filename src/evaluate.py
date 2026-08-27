@@ -17,13 +17,17 @@ from src.checkpoint_io import load_training_checkpoint
 from src.config import DataConfig
 from src.data import get_eval_transforms
 from src.gradcam_utils import generate_gradcam_overlay, save_overlay
-from src.model import build_resnet50_model, get_device
+from src.model import build_model, get_device
 
 
 def load_model_checkpoint(checkpoint_path: Path, num_classes: int, device: torch.device):
-    # No ImageNet download: checkpoint contains full trained weights.
-    model = build_resnet50_model(num_classes=num_classes, pretrained=False)
+    # No ImageNet download: checkpoint contains full trained weights. The checkpoint
+    # is self-describing (src.train saves an "architecture" field); old-format
+    # checkpoints without it default to resnet50, the only architecture that existed
+    # before checkpoints started recording it.
     payload = load_training_checkpoint(checkpoint_path, map_location=device)
+    architecture = payload.get("architecture", "resnet50")
+    model = build_model(architecture, num_classes=num_classes, pretrained=False)
     model.load_state_dict(payload["model_state_dict"])
     model.to(device)
     model.eval()
@@ -44,7 +48,12 @@ def collect_predictions(model, loader: DataLoader, device: torch.device):
 
 
 def plot_confusion_matrix(y_true, y_pred, class_names, output_path: Path):
-    cm = confusion_matrix(y_true, y_pred)
+    # `labels` pins the matrix to every known class, even ones absent from this
+    # particular y_true/y_pred (e.g. a small "secret" holdout that doesn't cover
+    # all 4 classes) -- otherwise the matrix shrinks and silently misaligns
+    # against `class_names` in the heatmap's tick labels.
+    labels = list(range(len(class_names)))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
     plt.figure(figsize=(7, 6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
     plt.xlabel("Predicted")
@@ -57,7 +66,12 @@ def plot_confusion_matrix(y_true, y_pred, class_names, output_path: Path):
 
 
 def save_report(y_true, y_pred, class_names, output_path: Path):
-    report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+    # Same reasoning as plot_confusion_matrix: without `labels`, sklearn raises
+    # ValueError as soon as y_true/y_pred cover fewer classes than class_names.
+    labels = list(range(len(class_names)))
+    report = classification_report(
+        y_true, y_pred, labels=labels, target_names=class_names, output_dict=True, zero_division=0
+    )
     report["accuracy"] = accuracy_score(y_true, y_pred)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -86,7 +100,7 @@ def generate_gradcam_samples(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate MRI classifier.")
-    parser.add_argument("--checkpoint", default="checkpoints/best_model.pth")
+    parser.add_argument("--checkpoint", default="checkpoints/resnet50_best_model.pth")
     parser.add_argument("--output-dir", default="outputs/eval")
     parser.add_argument("--batch-size", type=int, default=32)
     args = parser.parse_args()

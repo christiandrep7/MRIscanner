@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from src.config import DataConfig, TrainConfig
 from src.data import build_dataloaders
-from src.model import build_resnet50_model, get_device
+from src.model import ARCHITECTURES, build_model, get_device
 
 
 def set_seed(seed: int) -> None:
@@ -73,7 +73,8 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     bundle = build_dataloaders(data_cfg)
     device = get_device()
 
-    model = build_resnet50_model(
+    model = build_model(
+        train_cfg.architecture,
         num_classes=len(bundle.class_to_idx),
         pretrained=train_cfg.pretrained,
         imagenet_weights_path=train_cfg.imagenet_weights_path,
@@ -83,7 +84,7 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     criterion = nn.CrossEntropyLoss()
 
     train_cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_ckpt_path = train_cfg.checkpoint_dir / "best_model.pth"
+    best_ckpt_path = train_cfg.checkpoint_path
 
     best_val_loss = float("inf")
     patience_counter = 0
@@ -108,6 +109,7 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
             patience_counter = 0
             torch.save(
                 {
+                    "architecture": train_cfg.architecture,
                     "model_state_dict": model.state_dict(),
                     "class_to_idx": bundle.class_to_idx,
                     "data_config": asdict(data_cfg),
@@ -133,6 +135,7 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train MRI classifier.")
+    parser.add_argument("--architecture", choices=ARCHITECTURES, default="resnet50")
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -141,12 +144,12 @@ def parse_args() -> argparse.Namespace:
         "--imagenet-weights",
         type=str,
         default=None,
-        help="Path to local resnet50-11ad3fa6.pth (if download.pytorch.org is blocked).",
+        help="Path to a local ImageNet weights .pth file (if download.pytorch.org is blocked).",
     )
     parser.add_argument(
         "--no-pretrained",
         action="store_true",
-        help="Train from random ResNet50 init (no ImageNet weights; not recommended).",
+        help="Train from random init (no ImageNet weights; not recommended).",
     )
     return parser.parse_args()
 
@@ -156,6 +159,7 @@ if __name__ == "__main__":
     data_config = DataConfig(batch_size=args.batch_size, num_workers=args.num_workers)
     imagenet_path = Path(args.imagenet_weights) if args.imagenet_weights else None
     train_config = TrainConfig(
+        architecture=args.architecture,
         epochs=args.epochs,
         learning_rate=args.lr,
         pretrained=not args.no_pretrained,

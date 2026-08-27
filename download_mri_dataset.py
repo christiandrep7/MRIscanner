@@ -9,6 +9,7 @@ DEFAULT_DATASET = "masoudnickparvar/brain-tumor-mri-dataset"
 
 
 def find_kaggle_token() -> Path | None:
+    """Legacy kaggle.json lookup (kept for backward compatibility)."""
     home = Path.home()
     candidates = [
         home / ".kaggle" / "kaggle.json",
@@ -20,10 +21,31 @@ def find_kaggle_token() -> Path | None:
     return None
 
 
+def has_kaggle_credentials() -> bool:
+    """True if the installed `kaggle` package (>=1.8.0) can authenticate via any
+    supported method: the newer access-token system (KAGGLE_API_TOKEN env var, or
+    ~/.kaggle/access_token[.txt]) or the legacy kaggle.json API key file."""
+    if os.environ.get("KAGGLE_API_TOKEN"):
+        return True
+    home = Path.home()
+    candidates = [
+        home / ".kaggle" / "access_token",
+        home / ".kaggle" / "access_token.txt",
+    ]
+    if any(candidate.exists() for candidate in candidates):
+        return True
+    return find_kaggle_token() is not None
+
+
 def print_auth_help() -> None:
-    print("Kaggle API token not found.")
-    print("Create one at: https://www.kaggle.com/settings")
-    print("Then place kaggle.json in one of these locations:")
+    print("No Kaggle credentials found. Create one at: https://www.kaggle.com/settings")
+    print()
+    print("Option 1 (recommended, kaggle>=1.8.0): API Tokens section -> Generate New Token,")
+    print("then either:")
+    print(f"  - save it to: {Path.home() / '.kaggle' / 'access_token'}")
+    print("  - or: export KAGGLE_API_TOKEN=<token>")
+    print()
+    print("Option 2 (legacy): API section -> Create New Token, downloads kaggle.json, place at:")
     print(f"  - {Path.home() / '.kaggle' / 'kaggle.json'}")
     print(f"  - {Path.home() / '.config' / 'kaggle' / 'kaggle.json'}")
 
@@ -94,8 +116,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    token = find_kaggle_token()
-    if token is None:
+    if not has_kaggle_credentials():
         print_auth_help()
         sys.exit(1)
 

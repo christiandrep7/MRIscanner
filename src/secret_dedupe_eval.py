@@ -227,7 +227,7 @@ def main() -> None:
         default=0,
         help="pHash max Hamming distance to flag near-dup (0=exact pHash; MRI: avoid large values).",
     )
-    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/best_model.pth"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/resnet50_best_model.pth"))
     parser.add_argument("--eval-out", type=Path, default=Path("outputs/secret_eval_deduped"))
     parser.add_argument("--batch-size", type=int, default=32)
     args = parser.parse_args()

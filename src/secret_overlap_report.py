@@ -76,7 +76,7 @@ def main() -> None:
     )
     parser.add_argument("--sample-pairs", type=int, default=120)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/best_model.pth"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/resnet50_best_model.pth"))
     parser.add_argument("--eval-out", type=Path, default=Path("outputs/secret_eval_sha256_only"))
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-eval", action="store_true")
