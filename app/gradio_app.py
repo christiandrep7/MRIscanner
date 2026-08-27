@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from pathlib import Path
 
@@ -249,4 +250,6 @@ def build_ui() -> gr.Blocks:
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch()
+    # 0.0.0.0 + $PORT: works both locally (defaults to 127.0.0.1-equivalent on 7860)
+    # and on cloud hosts (Render, etc.) that assign a port via the PORT env var.
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))

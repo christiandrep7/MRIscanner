@@ -5,6 +5,12 @@ Three architectures — ResNet50, EfficientNet-B0, VGG16 — trained and compare
 side, with a Gradio UI for predictions, Grad-CAM explainability, model agreement/consensus
 checking, and benchmarking against a held-out test set.
 
+**🔴 Live demo (no install required):** https://vercel-demo-vert-eta.vercel.app —
+a lightweight single-model (EfficientNet-B0) version running on Vercel via ONNX Runtime.
+See [`vercel-demo/README.md`](vercel-demo/README.md) for why it's scoped down from the
+full app (Grad-CAM, all 3 models, and the benchmark tab need a persistent server, which
+serverless hosting can't provide). For the full experience, run it locally — see below.
+
 ## Quick start
 
 ```bash
@@ -187,31 +193,42 @@ Outputs: `outputs/secret_overlap_sha256_summary.json`, `outputs/phash_overlap_pa
 ## Deploying to Hugging Face Spaces
 
 Hugging Face Spaces is the natural host for this app: it's built for exactly this case
-(a persistent Gradio server, room for PyTorch model weights, a free CPU tier) — unlike
-serverless platforms (Vercel, Netlify, AWS Lambda), which time out long before a
-multi-model benchmark run finishes and don't keep a process alive between requests.
+(a persistent Gradio server, room for PyTorch model weights) — unlike serverless
+platforms (Vercel, Netlify, AWS Lambda), which time out long before a multi-model
+benchmark run finishes and don't keep a process alive between requests.
+
+**Free-tier gotcha (learned the hard way):** `cpu-basic` hardware actually requires a
+paid plan now. On a free personal account, **ZeroGPU** (`--flavor zero-a10g`) is the
+*only* way to host a Gradio Space for free — and that itself needs your account to be
+**at least 30 days old and in good standing** (verified email). A brand-new account
+will get a `402 Payment Required` error creating any Gradio/Docker Space at all. If
+you hit that: either wait out the 30 days, request a
+[community grant](https://huggingface.co/docs/hub/spaces-gpus#community-gpu-grants),
+or subscribe to PRO. There's no free workaround for a new account today.
 
 1. Create a free account at [huggingface.co](https://huggingface.co), then
    [create a new Space](https://huggingface.co/new-space): SDK = **Gradio**,
-   Hardware = **CPU basic** (free).
+   Hardware = **ZeroGPU** (the only free Gradio option; ignore `cpu-basic` — it's
+   paid-only despite how it reads in the picker).
 2. Clone your new Space (a separate git repo from this one):
    ```bash
    git clone https://huggingface.co/spaces/<your-username>/<space-name>
    cd <space-name>
    ```
-3. Copy this project's `app/`, `src/`, and `requirements.txt` into it, and add a
-   top-level `app.py` (Spaces looks for this by default):
+3. Copy this project's `app/`, `src/`, and `requirements.txt` into it, add
+   `import spaces` at the very top of `app/gradio_app.py` (before the `torch` import --
+   ZeroGPU's package patches `torch.cuda` and must load first), and add a top-level
+   `app.py` (Spaces looks for this by default):
    ```python
    from app.gradio_app import build_ui
 
    demo = build_ui()
    demo.launch()
    ```
-4. For a CPU-only Space, add this to the top of `requirements.txt` so pip doesn't try
-   to pull an irrelevant multi-gigabyte CUDA build of torch:
-   ```
-   --extra-index-url https://download.pytorch.org/whl/cpu
-   ```
+4. Remove the `torch==2.5.1` / `torchvision==0.20.1` pins from `requirements.txt` --
+   ZeroGPU only supports specific torch versions (2.8.0/2.9.1/2.10.0/2.11.0 at last
+   check) and preinstalls one; pinning an unsupported version will break the build.
+   Leave torch/torchvision unpinned and let the ZeroGPU runtime supply them.
 5. Track your trained checkpoints with git-lfs (Spaces supports this natively — no
    100MB-per-file ceiling like a plain GitHub repo):
    ```bash
