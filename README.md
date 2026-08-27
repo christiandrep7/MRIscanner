@@ -15,6 +15,30 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### Just want to use the trained models? (no training, no Kaggle account, ~1 minute)
+
+Pretrained checkpoints for all three architectures are published on this repo's
+[Releases page](https://github.com/christiandrep7/MRIscanner/releases/tag/pretrained-models-v1) —
+download them and go straight to predicting:
+
+```bash
+python download_checkpoints.py
+python -m app.gradio_app
+```
+
+Open **http://127.0.0.1:7860** and upload any MRI scan to get a prediction, confidence
+score, and Grad-CAM heatmap from each model — no dataset, no training, no GPU required.
+
+Held-out test accuracy for the published checkpoints: **ResNet50 95.0%**,
+**VGG16 94.2%**, **EfficientNet-B0 92.7%** (see [Comparing multiple architectures](#comparing-multiple-architectures)
+below for the full breakdown).
+
+**Note:** the **"🎲 Try a random never-seen scan"** button and the **Benchmark** tab both
+need the actual dataset on disk (to pull a real, labeled test image) — those two features
+need the "Download the real dataset yourself" step below too. Everything else (uploading
+your own scan, single or multi-model prediction, the agreement/consensus check) works with
+just the downloaded checkpoints.
+
 ### Just want to check the code works? (~2 minutes, no data or GPU needed)
 
 ```bash
@@ -26,21 +50,26 @@ This builds a tiny synthetic image set on the fly and runs the real training, ev
 Grad-CAM, benchmark, and Gradio code paths against it — no Kaggle account, no download, no
 GPU required. See [Running tests](#running-tests) below for coverage and slower e2e runs.
 
-### Want to actually run it and see real predictions?
+### Want to download the real dataset yourself, or retrain from scratch?
 
 1. Get a free Kaggle API token: kaggle.com → your profile → Settings → API →
    **Create New Token**. Either save the downloaded `kaggle.json` to
    `~/.kaggle/kaggle.json`, or (newer Kaggle accounts) use the **API Tokens** section
    and save the token to `~/.kaggle/access_token`.
-2. Download the dataset (~160MB, 7000 images) and train:
+2. Download the dataset (~160MB, 7000 images):
    ```bash
    python download_mri_dataset.py
+   ```
+   This alone is enough to unlock the random-scan button and Benchmark tab if you've
+   already downloaded the pretrained checkpoints above.
+3. (Optional) Retrain from scratch instead of using the pretrained checkpoints:
+   ```bash
    python -m src.train_all --epochs 15   # trains all 3 architectures
    ```
    Training all three takes roughly 1–3 hours depending on your machine (faster with a
    CUDA GPU or Apple Silicon's MPS backend, which this project uses automatically when
    available — see `src/model.py::get_device`).
-3. Launch the app:
+4. Launch the app:
    ```bash
    python -m app.gradio_app
    ```
@@ -49,15 +78,28 @@ GPU required. See [Running tests](#running-tests) below for coverage and slower 
    the true label and mark each model ✅/❌), pick which model(s) to run, and use the
    **Benchmark** tab to compare all three (or just one) on the held-out test set.
 
-Only trained one architecture so far? The app and CLI tools all handle missing
-checkpoints gracefully (reported as "not trained yet" / skipped, not a crash) — you don't
-need all three to start using it.
+Only have some checkpoints (pretrained or your own)? The app and CLI tools all handle
+missing checkpoints gracefully (reported as "not trained yet" / skipped, not a crash) — you
+don't need all three to start using it.
 
 ## Comparing multiple architectures
 
 Three backbones are supported: `resnet50`, `efficientnet_b0`, `vgg16`. Each trains to
 its own checkpoint (`checkpoints/{architecture}_best_model.pth`) and history file
 (`outputs/{architecture}_metrics_history.csv`), so training one never overwrites another.
+
+**Published checkpoint results** (held-out test set, 1600 images none of them trained on
+or used for checkpoint selection):
+
+| Architecture | Accuracy | Macro F1 | Params | Speed (ms/image, Apple M3) |
+|---|---|---|---|---|
+| ResNet50 | 95.0% | 0.949 | 23.5M | 33.7 |
+| EfficientNet-B0 | 92.7% | 0.925 | 4.0M | 17.6 (fastest) |
+| VGG16 | 94.2% | 0.941 | 134.3M | 47.1 |
+
+ResNet50 wins on accuracy; EfficientNet-B0 is ~2.7x faster than VGG16 for a small accuracy
+trade-off. Reproduce this yourself with `python -m src.benchmark` once you have
+checkpoints (pretrained or your own) and the dataset downloaded.
 
 Train one:
 
