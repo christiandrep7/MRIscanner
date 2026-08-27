@@ -250,6 +250,19 @@ def build_ui() -> gr.Blocks:
 
 if __name__ == "__main__":
     demo = build_ui()
+
+    # Custom routes (the async job API a stateless proxy like the Vercel demo
+    # polls) have to be added to a FastAPI app *before* Gradio is mounted onto
+    # it -- demo.app isn't built until launch(), which is too late.
+    import uvicorn
+    from fastapi import FastAPI
+
+    from app.async_api import attach_async_routes
+
+    fastapi_app = FastAPI()
+    attach_async_routes(fastapi_app)
+    fastapi_app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+
     # 0.0.0.0 + $PORT: works both locally (defaults to 127.0.0.1-equivalent on 7860)
     # and on cloud hosts (Render, etc.) that assign a port via the PORT env var.
-    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))

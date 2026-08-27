@@ -1,0 +1,42 @@
+name: deploy-vercel-demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vercel-demo/**"
+      - ".github/workflows/deploy-vercel.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vercel-demo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: pytest tests/ -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vercel-demo
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install --no-save vercel
+      - run: ./node_modules/.bin/vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+      - run: ./node_modules/.bin/vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+      - run: ./node_modules/.bin/vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"

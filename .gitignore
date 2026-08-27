@@ -19,3 +19,4 @@ checkpoints/
 # IDE/OS
 .DS_Store
 Thumbs.db
+.grepai/
