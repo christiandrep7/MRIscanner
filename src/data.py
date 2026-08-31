@@ -30,11 +30,18 @@ class MRIDataBundle:
 
 
 def get_train_transforms(image_size: int) -> transforms.Compose:
+    # RandomResizedCrop (instead of a fixed Resize) plus a bit more rotation/shift
+    # than before: benchmarking showed glioma generalizing far worse than the other
+    # 3 classes (test recall ~0.76-0.84 vs 0.94-1.0) despite ~98% val accuracy --
+    # a classic overfit-to-Training-distribution signature, not a labeling bug (see
+    # kb mistake/lesson from this session). More scale/position/rotation variation
+    # forces the model to learn shape rather than the exact framing of the Training set.
     return transforms.Compose(
         [
-            transforms.Resize((image_size, image_size)),
+            transforms.RandomResizedCrop(image_size, scale=(0.85, 1.0), ratio=(0.95, 1.05)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
+            transforms.RandomRotation(degrees=20),
+            transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
             transforms.ColorJitter(brightness=0.15, contrast=0.15),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),

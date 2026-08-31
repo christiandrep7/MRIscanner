@@ -20,13 +20,34 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _json_safe(value):
+    """Recursively convert Path -> str so checkpoint metadata unpickles on any
+    Python version. A checkpoint saved on one Python (e.g. Colab's) that embeds a
+    live pathlib.Path can fail to torch.load on another (observed: newer Pythons'
+    PosixPath resolves through the internal `pathlib._local` module, which older
+    Pythons don't have) -- str is portable everywhere."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    return value
+
+
 def run_epoch(
     model: torch.nn.Module,
     loader: torch.utils.data.DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
+    false_negative_penalty: tuple[int, float] | None = None,
 ) -> tuple[float, float]:
+    """`false_negative_penalty`, if given, is (class_idx, weight): adds
+    weight * mean(softmax_prob[:, class_idx]) over rows whose true label is NOT
+    class_idx -- i.e. penalizes the model for leaning towards e.g. "notumor"
+    on rows that are actually some other (tumor) class, on top of `criterion`.
+    Applied in both train and eval so early stopping's val_loss reflects the
+    same objective actually being optimized.
+    """
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
 
@@ -42,6 +63,13 @@ def run_epoch(
         with torch.set_grad_enabled(is_train):
             logits = model(images)
             loss = criterion(logits, labels)
+            if false_negative_penalty is not None:
+                penalty_idx, penalty_weight = false_negative_penalty
+                if penalty_weight > 0:
+                    is_other_class = labels != penalty_idx
+                    if is_other_class.any():
+                        probs = torch.softmax(logits, dim=1)
+                        loss = loss + penalty_weight * probs[is_other_class, penalty_idx].mean()
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -81,7 +109,19 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     ).to(device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = Adam(trainable_params, lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
-    criterion = nn.CrossEntropyLoss()
+
+    # Per-class weight tensor, resolved by name against this dataset's actual
+    # class_to_idx (never assume alphabetical order lines up with a hardcoded list).
+    class_weights = torch.ones(len(bundle.class_to_idx))
+    for class_name, weight_value in train_cfg.class_loss_weights.items():
+        if class_name in bundle.class_to_idx:
+            class_weights[bundle.class_to_idx[class_name]] = weight_value
+    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device), label_smoothing=train_cfg.label_smoothing)
+
+    false_negative_penalty = None
+    penalty_class_idx = bundle.class_to_idx.get(train_cfg.false_negative_penalty_class)
+    if penalty_class_idx is not None and train_cfg.false_negative_penalty_weight > 0:
+        false_negative_penalty = (penalty_class_idx, train_cfg.false_negative_penalty_weight)
 
     train_cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_ckpt_path = train_cfg.checkpoint_path
@@ -91,8 +131,12 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     history: list[dict] = []
 
     for epoch in range(1, train_cfg.epochs + 1):
-        train_loss, train_acc = run_epoch(model, bundle.train_loader, criterion, optimizer, device)
-        val_loss, val_acc = run_epoch(model, bundle.val_loader, criterion, None, device)
+        train_loss, train_acc = run_epoch(
+            model, bundle.train_loader, criterion, optimizer, device, false_negative_penalty
+        )
+        val_loss, val_acc = run_epoch(
+            model, bundle.val_loader, criterion, None, device, false_negative_penalty
+        )
 
         epoch_row = {
             "epoch": epoch,
@@ -112,8 +156,8 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
                     "architecture": train_cfg.architecture,
                     "model_state_dict": model.state_dict(),
                     "class_to_idx": bundle.class_to_idx,
-                    "data_config": asdict(data_cfg),
-                    "train_config": asdict(train_cfg),
+                    "data_config": _json_safe(asdict(data_cfg)),
+                    "train_config": _json_safe(asdict(train_cfg)),
                 },
                 best_ckpt_path,
             )

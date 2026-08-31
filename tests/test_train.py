@@ -54,14 +54,21 @@ def test_train_works_for_every_architecture(
 def test_early_stopping_halts_before_max_epochs(tiny_data_config: DataConfig, tiny_train_config: TrainConfig):
     tiny_train_config.epochs = 10
     tiny_train_config.early_stopping_patience = 1
-    tiny_train_config.learning_rate = 0.0  # weights never improve -> val_loss never beats first epoch
+    tiny_train_config.learning_rate = 0.0  # weights never update
 
     train(tiny_data_config, tiny_train_config)
 
     with tiny_train_config.history_path.open() as f:
         rows = list(csv.DictReader(f))
-    # patience=1 means training stops at most 2 epochs after the best one
-    assert len(rows) <= 3
+    val_losses = [float(row["val_loss"]) for row in rows]
+    # With lr=0.0 the weights never update, but BatchNorm running stats still
+    # drift each epoch from the forward pass alone (more so now with heavier
+    # train-time augmentation), so "best epoch" isn't pinned to epoch 1 -- the
+    # real contract is: it stops well short of the 10-epoch budget, and within
+    # patience(=1) epochs of whichever epoch actually had the lowest val_loss.
+    assert len(rows) < tiny_train_config.epochs
+    best_epoch_idx = val_losses.index(min(val_losses))
+    assert len(rows) <= best_epoch_idx + 1 + tiny_train_config.early_stopping_patience
 
 
 def test_save_history_noop_on_empty_list(tmp_path: Path):
