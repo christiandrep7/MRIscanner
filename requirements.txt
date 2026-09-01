@@ -13,3 +13,4 @@ uvicorn
 pandas
 tqdm
 ImageHash
+nibabel
