@@ -137,6 +137,19 @@ def test_predict_get_with_random_relays_to_random_scan_endpoint(monkeypatch):
     server.shutdown()
 
 
+def test_predict_get_with_random_and_class_name_forwards_class_filter(monkeypatch):
+    fake = _FakeUpstreamHandler({"image": "data:image/png;base64,abc", "true_label": "glioma"})
+    server, port = _start_fake_upstream(fake)
+    monkeypatch.setattr(p, "EC2_BASE_URL", f"http://127.0.0.1:{port}")
+
+    h = _FakeRequestHandler(path="/api/predict?random=1&class_name=glioma")
+    h.do_GET()
+
+    assert h._status == 200
+    assert fake.received_path == "/api/random-scan?class_name=glioma"
+    server.shutdown()
+
+
 def test_predict_get_missing_query_params_returns_400():
     h = _FakeRequestHandler(path="/api/predict")
     h.do_GET()

@@ -127,12 +127,12 @@ def attach_async_routes(app) -> None:
         return {k: v for k, v in job.items() if k != "created"}
 
     @app.get("/api/random-scan")
-    def random_scan():
+    def random_scan(class_name: str | None = None):
         # Fast (pick a file + base64-encode it) -- no background job needed,
         # unlike predict/benchmark which can take minutes.
         from app.gradio_app import pick_random_test_image
 
-        image, true_label = pick_random_test_image()
+        image, true_label = pick_random_test_image(class_filter=class_name)
         if image is None:
             return JSONResponse(
                 status_code=404,

@@ -78,6 +78,16 @@
   button.secondary { background: #eef2f9; color: var(--accent-dark); }
   button.secondary:hover:not(:disabled) { background: #dfe8f5; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #randomClassSelect {
+    padding: 12px 16px;
+    font-size: 1rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #eef2f9;
+    color: var(--accent-dark);
+    cursor: pointer;
+  }
   #summary, #benchSummary {
     margin: 4px 0 20px 0;
     font-size: 1.05rem;
@@ -148,6 +158,13 @@
 
       <div class="button-row">
         <button id="predictBtn" disabled>Upload an image first</button>
+        <select id="randomClassSelect" aria-label="Random scan class">
+          <option value="">Any class</option>
+          <option value="glioma">glioma</option>
+          <option value="meningioma">meningioma</option>
+          <option value="notumor">notumor</option>
+          <option value="pituitary">pituitary</option>
+        </select>
         <button id="randomBtn" class="secondary">🎲 Try a random never-seen scan</button>
       </div>
       <div class="status-line" id="statusLine"></div>
@@ -207,6 +224,7 @@ const preview = document.getElementById('preview');
 const placeholder = document.getElementById('placeholder');
 const predictBtn = document.getElementById('predictBtn');
 const randomBtn = document.getElementById('randomBtn');
+const randomClassSelect = document.getElementById('randomClassSelect');
 const statusLine = document.getElementById('statusLine');
 const resultCard = document.getElementById('resultCard');
 const summaryDiv = document.getElementById('summary');
@@ -252,7 +270,11 @@ randomBtn.addEventListener('click', async () => {
   randomBtn.disabled = true;
   randomBtn.innerHTML = '<span class="spinner"></span>Fetching...';
   try {
-    const res = await fetch('/api/predict?random=1');
+    const chosenClass = randomClassSelect.value;
+    const url = chosenClass
+      ? `/api/predict?random=1&class_name=${encodeURIComponent(chosenClass)}`
+      : '/api/predict?random=1';
+    const res = await fetch(url);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not fetch a random scan');
 

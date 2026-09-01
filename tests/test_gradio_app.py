@@ -185,13 +185,43 @@ def test_run_benchmark_empty_selection_returns_nothing(tiny_data_config, tmp_pat
 def test_pick_random_test_image_returns_pil_image_and_true_label(tiny_dataset: Path):
     from tests.conftest import CLASS_NAMES
 
-    image, true_label = gradio_app.pick_random_test_image(tiny_dataset)
+    image, true_label = gradio_app.pick_random_test_image(data_root=tiny_dataset)
     assert isinstance(image, Image.Image)
     assert true_label in CLASS_NAMES
 
 
 def test_pick_random_test_image_none_when_no_testing_dir(tmp_path: Path):
-    assert gradio_app.pick_random_test_image(tmp_path) == (None, None)
+    assert gradio_app.pick_random_test_image(data_root=tmp_path) == (None, None)
+
+
+@pytest.mark.parametrize("class_filter", ["glioma", "meningioma", "notumor", "pituitary"])
+def test_pick_random_test_image_respects_class_filter(tiny_dataset: Path, class_filter: str):
+    for _ in range(5):  # random pick -- repeat to make a filter-ignoring bug likely to surface
+        image, true_label = gradio_app.pick_random_test_image(class_filter, data_root=tiny_dataset)
+        assert isinstance(image, Image.Image)
+        assert true_label == class_filter
+
+
+def test_pick_random_test_image_any_is_case_insensitive_and_unrestricted(tiny_dataset: Path):
+    from tests.conftest import CLASS_NAMES
+
+    image, true_label = gradio_app.pick_random_test_image("aNy", data_root=tiny_dataset)
+    assert isinstance(image, Image.Image)
+    assert true_label in CLASS_NAMES
+
+
+def test_pick_random_test_image_unknown_class_filter_returns_none(tiny_dataset: Path):
+    assert gradio_app.pick_random_test_image("not_a_real_class", data_root=tiny_dataset) == (None, None)
+
+
+def test_list_test_classes_matches_dataset_folders(tiny_dataset: Path):
+    from tests.conftest import CLASS_NAMES
+
+    assert gradio_app.list_test_classes(tiny_dataset) == sorted(CLASS_NAMES)
+
+
+def test_list_test_classes_empty_when_no_testing_dir(tmp_path: Path):
+    assert gradio_app.list_test_classes(tmp_path) == []
 
 
 @pytest.mark.parametrize(

@@ -70,16 +70,33 @@ def predict_with(architecture: str, image: Image.Image, device: torch.device, ch
     return f"{pred_label} ({confidence:.2%})", overlay
 
 
-def pick_random_test_image(data_root: Path = Path("data")) -> tuple[Image.Image | None, str | None]:
+def list_test_classes(data_root: Path = Path("data")) -> list[str]:
+    """Class names actually present under data/Testing, so the UI's random-scan
+    class picker never offers a class this server doesn't have test scans for."""
+    test_dir = data_root / "Testing"
+    if not test_dir.exists():
+        return []
+    return sorted(d.name for d in test_dir.iterdir() if d.is_dir())
+
+
+def pick_random_test_image(
+    class_filter: str | None = None, data_root: Path = Path("data")
+) -> tuple[Image.Image | None, str | None]:
     """Loads a random image from data/Testing -- a scan no model has ever trained on
     or used for checkpoint selection -- plus its true class (the folder it's filed
     under), so the UI can say whether each model actually got it right.
-    Returns (None, None) if no test data is present."""
+    `class_filter`: restrict to one specific class (e.g. "glioma"); None or "Any"
+    (case-insensitive) picks from any class. Returns (None, None) if nothing matches
+    (no test data present, or class_filter names a class that doesn't exist here)."""
     test_dir = data_root / "Testing"
     if not test_dir.exists():
         return None, None
 
-    class_dirs = [d for d in test_dir.iterdir() if d.is_dir()]
+    if class_filter and class_filter.lower() != "any":
+        candidate = test_dir / class_filter
+        class_dirs = [candidate] if candidate.is_dir() else []
+    else:
+        class_dirs = [d for d in test_dir.iterdir() if d.is_dir()]
     random.shuffle(class_dirs)
     for class_dir in class_dirs:
         images = [p for p in class_dir.iterdir() if p.suffix.lower() in VALID_IMAGE_EXT]
@@ -244,6 +261,13 @@ def build_ui() -> gr.Blocks:
                 )
             with gr.Row():
                 predict_button = gr.Button("Predict", variant="primary")
+                random_class_select = gr.Dropdown(
+                    choices=["Any"] + list_test_classes(),
+                    value="Any",
+                    label="Random scan class",
+                    scale=0,
+                    min_width=160,
+                )
                 random_scan_button = gr.Button("🎲 Try a random never-seen scan")
 
             consensus_output = gr.Markdown()
@@ -265,7 +289,9 @@ def build_ui() -> gr.Blocks:
             predict_button.click(lambda: None, inputs=[], outputs=[true_label_state]).then(
                 predict_all, inputs=[image_input, model_select, true_label_state], outputs=predict_outputs
             )
-            random_scan_button.click(pick_random_test_image, inputs=[], outputs=[image_input, true_label_state]).then(
+            random_scan_button.click(
+                pick_random_test_image, inputs=[random_class_select], outputs=[image_input, true_label_state]
+            ).then(
                 predict_all, inputs=[image_input, model_select, true_label_state], outputs=predict_outputs
             )
 

@@ -114,7 +114,7 @@ def test_random_scan_returns_image_and_true_label(monkeypatch):
     import app.gradio_app as gradio_app
 
     fake_image = Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8), mode="RGB")
-    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda: (fake_image, "meningioma"))
+    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda class_filter=None: (fake_image, "meningioma"))
 
     client = _make_client()
     resp = client.get("/api/random-scan")
@@ -128,13 +128,33 @@ def test_random_scan_returns_image_and_true_label(monkeypatch):
 def test_random_scan_404_when_no_dataset(monkeypatch):
     import app.gradio_app as gradio_app
 
-    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda: (None, None))
+    monkeypatch.setattr(gradio_app, "pick_random_test_image", lambda class_filter=None: (None, None))
 
     client = _make_client()
     resp = client.get("/api/random-scan")
 
     assert resp.status_code == 404
     assert "error" in resp.json()
+
+
+def test_random_scan_passes_class_name_query_param_through(monkeypatch):
+    import app.gradio_app as gradio_app
+
+    fake_image = Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8), mode="RGB")
+    received: dict = {}
+
+    def fake_pick(class_filter=None):
+        received["class_filter"] = class_filter
+        return fake_image, class_filter or "glioma"
+
+    monkeypatch.setattr(gradio_app, "pick_random_test_image", fake_pick)
+
+    client = _make_client()
+    resp = client.get("/api/random-scan?class_name=glioma")
+
+    assert resp.status_code == 200
+    assert received["class_filter"] == "glioma"
+    assert resp.json()["true_label"] == "glioma"
 
 
 def test_benchmark_job_end_to_end(monkeypatch, tiny_data_config, all_fake_checkpoints):

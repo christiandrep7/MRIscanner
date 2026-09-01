@@ -11,13 +11,14 @@ Routing (single entrypoint handles everything under /api/predict):
   POST {job_type: "predict", ...}   -> EC2 /api/jobs/predict
   POST {job_type: "benchmark", ...} -> EC2 /api/jobs/benchmark
   GET  ?job_id=...                  -> EC2 /api/jobs/{job_id}  (poll, either job type)
-  GET  ?random=1                    -> EC2 /api/random-scan    (synchronous, not a job)
+  GET  ?random=1&class_name=glioma  -> EC2 /api/random-scan    (synchronous, not a job;
+                                        class_name is optional -- omit/"Any" for any class)
 """
 from __future__ import annotations
 
 import json
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 EC2_BASE_URL = "http://3.145.114.146:7860"
@@ -52,11 +53,15 @@ class handler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             job_id = query.get("job_id", [None])[0]
             is_random = query.get("random", [None])[0]
+            class_name = query.get("class_name", [None])[0]
 
             if job_id:
                 status, payload = _relay(f"{EC2_BASE_URL}/api/jobs/{job_id}")
             elif is_random:
-                status, payload = _relay(f"{EC2_BASE_URL}/api/random-scan")
+                url = f"{EC2_BASE_URL}/api/random-scan"
+                if class_name:
+                    url += f"?class_name={quote(class_name)}"
+                status, payload = _relay(url)
             else:
                 self._send_json(400, {"error": "expected a job_id or random query parameter"})
                 return
