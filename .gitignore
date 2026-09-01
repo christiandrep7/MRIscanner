@@ -12,6 +12,11 @@ outputs/
 checkpoints/
 *.pth
 *.pt
+external_raw/
+external_raw_slices/
+external_deduped/
+pipeline_state/
+run_pipeline_wrapped.sh
 
 # Notebook checkpoints
 .ipynb_checkpoints/
