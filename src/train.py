@@ -96,7 +96,30 @@ def save_history(history: list[dict], output_path: Path) -> None:
         writer.writerows(history)
 
 
+def resume_state_path(train_cfg: TrainConfig) -> Path:
+    """Saved every epoch (not just on improvement) so an interrupted run loses
+    at most 1 epoch of progress -- distinct from checkpoint_path, which only
+    holds the best model's weights and no optimizer/epoch state."""
+    return train_cfg.checkpoint_dir / f"{train_cfg.architecture}_resume_state.pth"
+
+
+def training_done_marker(train_cfg: TrainConfig) -> Path:
+    """Written only once a run truly finishes (early-stopped or hit max
+    epochs) -- lets a driver script (train_all, or a restart-after-crash loop)
+    tell "fully done" apart from "partially done, safe to resume"."""
+    return train_cfg.checkpoint_dir / f"{train_cfg.architecture}_training_done.marker"
+
+
 def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
+    train_cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if training_done_marker(train_cfg).exists():
+        # A driver script (train_all, or a restart-after-crash loop) re-invoked
+        # train() for an architecture that already fully finished -- skip
+        # before paying for dataset/model construction, not just before the
+        # epoch loop.
+        print(f"{train_cfg.architecture} already finished training -- skipping.")
+        return train_cfg.checkpoint_path
+
     set_seed(data_cfg.seed)
     bundle = build_dataloaders(data_cfg)
     device = get_device()
@@ -123,14 +146,30 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     if penalty_class_idx is not None and train_cfg.false_negative_penalty_weight > 0:
         false_negative_penalty = (penalty_class_idx, train_cfg.false_negative_penalty_weight)
 
-    train_cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_ckpt_path = train_cfg.checkpoint_path
+    resume_path = resume_state_path(train_cfg)
+    done_marker = training_done_marker(train_cfg)
 
     best_val_loss = float("inf")
     patience_counter = 0
     history: list[dict] = []
+    start_epoch = 1
 
-    for epoch in range(1, train_cfg.epochs + 1):
+    if resume_path.exists():
+        resume_state = torch.load(resume_path, map_location=device, weights_only=False)
+        if resume_state.get("architecture") == train_cfg.architecture:
+            model.load_state_dict(resume_state["model_state_dict"])
+            optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+            best_val_loss = resume_state["best_val_loss"]
+            patience_counter = resume_state["patience_counter"]
+            history = resume_state["history"]
+            start_epoch = resume_state["epoch"] + 1
+            print(
+                f"Resuming {train_cfg.architecture} from epoch {start_epoch} "
+                f"(best_val_loss so far: {best_val_loss:.6f})"
+            )
+
+    for epoch in range(start_epoch, train_cfg.epochs + 1):
         train_loss, train_acc = run_epoch(
             model, bundle.train_loader, criterion, optimizer, device, false_negative_penalty
         )
@@ -164,6 +203,23 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
         else:
             patience_counter += 1
 
+        # Saved every epoch regardless of improvement -- if training is
+        # interrupted (sleep, crash, power loss) between here and the next
+        # epoch's end, re-running train() picks up from epoch+1 instead of
+        # starting the whole architecture over.
+        torch.save(
+            {
+                "architecture": train_cfg.architecture,
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_val_loss": best_val_loss,
+                "patience_counter": patience_counter,
+                "history": history,
+            },
+            resume_path,
+        )
+
         if patience_counter >= train_cfg.early_stopping_patience:
             print(
                 f"Early stopping at epoch {epoch} (no val loss improvement for "
@@ -174,6 +230,8 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     save_history(history, train_cfg.history_path)
     print(f"Saved training history to {train_cfg.history_path}")
     print(f"Best model checkpoint: {best_ckpt_path}")
+    done_marker.touch()
+    resume_path.unlink(missing_ok=True)  # run truly finished -- no longer needed
     return best_ckpt_path
 
 

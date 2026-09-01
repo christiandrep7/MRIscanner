@@ -8,7 +8,14 @@ import torch
 
 from src.config import DataConfig, TrainConfig
 from src.model import ARCHITECTURES
-from src.train import run_epoch, save_history, set_seed, train
+from src.train import (
+    resume_state_path,
+    run_epoch,
+    save_history,
+    set_seed,
+    train,
+    training_done_marker,
+)
 
 
 def test_train_writes_checkpoint_and_history(tiny_data_config: DataConfig, tiny_train_config: TrainConfig):
@@ -69,6 +76,62 @@ def test_early_stopping_halts_before_max_epochs(tiny_data_config: DataConfig, ti
     assert len(rows) < tiny_train_config.epochs
     best_epoch_idx = val_losses.index(min(val_losses))
     assert len(rows) <= best_epoch_idx + 1 + tiny_train_config.early_stopping_patience
+
+
+def test_train_writes_done_marker_and_cleans_up_resume_state(
+    tiny_data_config: DataConfig, tiny_train_config: TrainConfig
+):
+    tiny_train_config.epochs = 2
+
+    train(tiny_data_config, tiny_train_config)
+
+    assert training_done_marker(tiny_train_config).exists()
+    assert not resume_state_path(tiny_train_config).exists()
+
+
+def test_train_skips_already_finished_architecture(
+    tiny_data_config: DataConfig, tiny_train_config: TrainConfig, monkeypatch
+):
+    tiny_train_config.epochs = 2
+    train(tiny_data_config, tiny_train_config)  # first run: finishes normally
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("run_epoch should not be called for an already-finished architecture")
+
+    monkeypatch.setattr("src.train.run_epoch", _fail_if_called)
+
+    result_path = train(tiny_data_config, tiny_train_config)  # second run: should skip entirely
+
+    assert result_path == tiny_train_config.checkpoint_path
+
+
+def test_train_resumes_from_interrupted_run(tiny_data_config: DataConfig, tiny_train_config: TrainConfig, monkeypatch):
+    tiny_train_config.epochs = 3
+    real_run_epoch = run_epoch
+    call_count = {"n": 0}
+
+    def _crash_on_third_call(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 3:  # epoch 1's train+val calls succeed, epoch 2's train call "crashes"
+            raise RuntimeError("simulated interruption (crash/sleep/power loss)")
+        return real_run_epoch(*args, **kwargs)
+
+    monkeypatch.setattr("src.train.run_epoch", _crash_on_third_call)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        train(tiny_data_config, tiny_train_config)
+
+    # Epoch 1 finished and saved resume state before the crash; not "done" yet.
+    assert resume_state_path(tiny_train_config).exists()
+    assert not training_done_marker(tiny_train_config).exists()
+
+    monkeypatch.undo()  # restore the real run_epoch for the resumed run
+    train(tiny_data_config, tiny_train_config)
+
+    assert training_done_marker(tiny_train_config).exists()
+    with tiny_train_config.history_path.open() as f:
+        rows = list(csv.DictReader(f))
+    epochs_seen = [int(row["epoch"]) for row in rows]
+    assert epochs_seen == [1, 2, 3]  # resumed at epoch 2, not restarted from epoch 1
 
 
 def test_save_history_noop_on_empty_list(tmp_path: Path):
