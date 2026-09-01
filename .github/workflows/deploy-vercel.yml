@@ -36,6 +36,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # vercel build needs `uv` on PATH to build the Python entrypoint (per
+      # pyproject.toml's [tool.vercel] config) -- not preinstalled on the
+      # ubuntu runner, unlike a local machine that already has it.
+      - uses: astral-sh/setup-uv@v5
       # Pinned: vercel@59.x depends on @vercel/fastify@6.0.0, which was never
       # actually published (latest real release is 5.0.0) -- unpinned/latest
       # installs fail with ETARGET. vercel@58 resolves cleanly.
