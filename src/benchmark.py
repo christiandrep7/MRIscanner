@@ -14,6 +14,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import datasets
 
+from src.checkpoint_io import load_training_checkpoint
 from src.config import DataConfig
 from src.data import get_eval_transforms
 from src.evaluate import collect_predictions, load_model_checkpoint, plot_confusion_matrix, save_report
@@ -44,10 +45,13 @@ def benchmark_models(
     device = get_device()
     test_dir = data_cfg.data_root / data_cfg.test_dir_name
     test_dataset = datasets.ImageFolder(test_dir, transform=get_eval_transforms(data_cfg.image_size))
-    class_names = test_dataset.classes
-    loader = DataLoader(
-        test_dataset, batch_size=data_cfg.batch_size, shuffle=False, num_workers=data_cfg.num_workers
-    )
+    # Snapshot before any remapping below -- this test folder may hold only a
+    # subset of the trained classes (e.g. an external, cross-distribution
+    # held-out set with just 2 of 4 classes), so its own ImageFolder-assigned
+    # indices (a fresh 0..N-1 over whatever subdirectories are physically
+    # present) don't line up with the model's actual (larger) output space.
+    original_samples = list(test_dataset.samples)
+    local_idx_to_name = {v: k for k, v in test_dataset.class_to_idx.items()}
 
     results: list[BenchmarkResult] = []
     for architecture, checkpoint_path in specs:
@@ -63,6 +67,29 @@ def benchmark_models(
             continue
 
         try:
+            payload = load_training_checkpoint(checkpoint_path, map_location=device)
+            checkpoint_class_to_idx: dict[str, int] = payload["class_to_idx"]
+            class_names = [name for name, _ in sorted(checkpoint_class_to_idx.items(), key=lambda kv: kv[1])]
+
+            missing = [name for name in local_idx_to_name.values() if name not in checkpoint_class_to_idx]
+            if missing:
+                raise ValueError(
+                    f"Test folder has class(es) {missing} that {architecture}'s checkpoint was never "
+                    "trained on -- can't score predictions for a class the model has no output for."
+                )
+            # Remap into the checkpoint's own global label space (read from the
+            # checkpoint, never assumed) rather than trusting this test folder's
+            # local re-numbering -- rebuilt from the pristine snapshot each loop
+            # iteration so one architecture's remap can't leak into the next's.
+            test_dataset.samples = [
+                (path, checkpoint_class_to_idx[local_idx_to_name[local_target]])
+                for path, local_target in original_samples
+            ]
+            test_dataset.targets = [target for _, target in test_dataset.samples]
+            loader = DataLoader(
+                test_dataset, batch_size=data_cfg.batch_size, shuffle=False, num_workers=data_cfg.num_workers
+            )
+
             model = load_model_checkpoint(checkpoint_path, num_classes=len(class_names), device=device)
             num_params = sum(p.numel() for p in model.parameters())
 

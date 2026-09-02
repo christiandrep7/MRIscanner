@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 from src.benchmark import benchmark_models, default_checkpoint_specs, save_benchmark_report
 from src.config import DataConfig
 from src.model import ARCHITECTURES
+
+
+def _make_image(path: Path, seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    arr = rng.integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(arr, mode="RGB").save(path)
 
 
 def test_default_checkpoint_specs_covers_all_architectures(tmp_path: Path):
@@ -58,6 +69,37 @@ def test_benchmark_models_writes_per_model_artifacts(
     for architecture in all_fake_checkpoints:
         assert (output_dir / architecture / "confusion_matrix.png").exists()
         assert (output_dir / architecture / "classification_report.json").exists()
+
+
+def test_benchmark_models_scores_partial_class_test_set_in_checkpoint_label_space(
+    tiny_data_config: DataConfig, all_fake_checkpoints: dict[str, Path], tmp_path: Path
+):
+    """A cross-distribution held-out set with only 2 of the 4 trained classes
+    physically present (exactly the shape of BraTS/IXI's ExternalTesting) --
+    real bug caught running this for real: building the eval model with
+    num_classes taken from this folder's own (2-class) ImageFolder discovery,
+    instead of the checkpoint's actual (4-class) trained output size, crashed
+    every architecture with a state_dict shape mismatch."""
+    external_root = tiny_data_config.data_root / "ExternalOnly"
+    for class_name in ["glioma", "notumor"]:
+        for i in range(4):
+            _make_image(external_root / class_name / f"img_{i}.jpg", seed=i)
+
+    external_cfg = replace(tiny_data_config, test_dir_name="ExternalOnly")
+    specs = [(architecture, path) for architecture, path in all_fake_checkpoints.items()]
+
+    results = benchmark_models(specs, external_cfg, output_dir=tmp_path / "benchmark_external")
+
+    assert all(r.available for r in results), [r.error for r in results if not r.available]
+    for architecture in all_fake_checkpoints:
+        report = json.loads(
+            (tmp_path / "benchmark_external" / architecture / "classification_report.json").read_text()
+        )
+        # All 4 trained classes appear (even meningioma/pituitary, zero support
+        # here) -- proves this scored in the checkpoint's full label space, not
+        # a fresh 0/1 renumbering of just the 2 classes physically present.
+        assert "meningioma" in report
+        assert "pituitary" in report
 
 
 def test_save_benchmark_report_writes_json_and_chart(
