@@ -18,6 +18,36 @@ def _make_png(path: Path, seed: int) -> None:
     Image.fromarray(rng.integers(0, 255, size=(8, 8, 3), dtype=np.uint8)).save(path)
 
 
+def _touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fake")
+
+
+def test_reclaim_disk_after_brats_download_keeps_only_t1ce_and_seg(tmp_path: Path):
+    patient_dir = tmp_path / "BraTS20_Training_001"
+    _touch(patient_dir / "BraTS20_Training_001_flair.nii")
+    _touch(patient_dir / "BraTS20_Training_001_t1.nii")
+    _touch(patient_dir / "BraTS20_Training_001_t1ce.nii")  # must survive -- filename contains "_t1."
+    _touch(patient_dir / "BraTS20_Training_001_t2.nii")
+    _touch(patient_dir / "BraTS20_Training_001_seg.nii")
+    _touch(tmp_path / "brats20-dataset-training-validation.zip")
+
+    pipeline._reclaim_disk_after_brats_download(tmp_path)
+
+    remaining = {p.name for p in tmp_path.rglob("*") if p.is_file()}
+    assert remaining == {"BraTS20_Training_001_t1ce.nii", "BraTS20_Training_001_seg.nii"}
+
+
+def test_reclaim_disk_after_ixi_download_removes_only_the_zip(tmp_path: Path):
+    _touch(tmp_path / "IXI002-Guys-0828-T1.nii")
+    _touch(tmp_path / "ixi-healthy-brain-mri-t1-t2.zip")
+
+    pipeline._reclaim_disk_after_ixi_download(tmp_path)
+
+    remaining = {p.name for p in tmp_path.rglob("*") if p.is_file()}
+    assert remaining == {"IXI002-Guys-0828-T1.nii"}
+
+
 def test_stage_marker_round_trip(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path / "pipeline_state")

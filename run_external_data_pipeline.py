@@ -59,6 +59,29 @@ def stage_download_kaggle_dataset() -> None:
     _mark_stage_done("download_kaggle")
 
 
+def _reclaim_disk_after_brats_download(brats_dir: Path) -> None:
+    """BraTS ships 5 modalities per patient (flair/t1/t1ce/t2/seg); only t1ce
+    (the image) and seg (the tumor mask) are ever used -- extract_brats_glioma_slices
+    ignores the rest. Deleting the unused ~60% of extracted volumes, plus the
+    zip Kaggle's API leaves behind after unzip=True, is what keeps this
+    pipeline from exhausting disk (hit for real on a Colab run: BraTS alone
+    extracts to 25GB+ if every modality is kept, on top of IXI and the
+    original Kaggle set)."""
+    for zip_path in brats_dir.rglob("*.zip"):
+        zip_path.unlink()
+    removed = 0
+    for pattern in ("*_flair.nii", "*_t1.nii", "*_t2.nii"):  # keeps *_t1ce.nii, *_seg.nii
+        for p in brats_dir.rglob(pattern):
+            p.unlink()
+            removed += 1
+    print(f"  freed {removed} unused BraTS modality files (kept t1ce + seg only)")
+
+
+def _reclaim_disk_after_ixi_download(ixi_dir: Path) -> None:
+    for zip_path in ixi_dir.rglob("*.zip"):
+        zip_path.unlink()
+
+
 def stage_download_external_raw() -> None:
     if _stage_done("download_external_raw"):
         print("[skip] BraTS/IXI raw downloads already present.")
@@ -73,10 +96,13 @@ def stage_download_external_raw() -> None:
     brats_dir.mkdir(parents=True, exist_ok=True)
     ixi_dir.mkdir(parents=True, exist_ok=True)
 
-    print("[run] Downloading BraTS2020 (~7GB)...")
+    print("[run] Downloading BraTS2020 (~7GB compressed; only 2 of 5 modalities are kept)...")
     api.dataset_download_files(BRATS_DATASET, path=str(brats_dir), unzip=True, quiet=False)
+    _reclaim_disk_after_brats_download(brats_dir)
+
     print("[run] Downloading IXI (~4GB)...")
     api.dataset_download_files(IXI_DATASET, path=str(ixi_dir), unzip=True, quiet=False)
+    _reclaim_disk_after_ixi_download(ixi_dir)
 
     _mark_stage_done("download_external_raw")
 
