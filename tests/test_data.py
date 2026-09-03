@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 from src.config import DataConfig
 from src.data import (
+    PACSStyleNoise,
     _split_train_val_indices,
     build_dataloaders,
     get_eval_transforms,
     get_train_transforms,
 )
+
+
+def _solid_image(size: tuple[int, int] = (128, 128)) -> Image.Image:
+    return Image.fromarray(np.full((size[1], size[0], 3), 128, dtype=np.uint8), mode="RGB")
 
 
 def test_build_dataloaders_class_mapping(tiny_data_config: DataConfig):
@@ -75,3 +82,39 @@ def test_train_transforms_include_augmentation_and_eval_does_not():
     assert "RandomRotation" in train_repr
     assert "RandomHorizontalFlip" not in eval_repr
     assert "RandomRotation" not in eval_repr
+
+
+def test_pacs_style_noise_never_applied_at_zero_probability():
+    noise = PACSStyleNoise(p=0.0)
+    img = _solid_image()
+    out = noise(img)
+    assert np.array_equal(np.array(out), np.array(img))
+
+
+def test_pacs_style_noise_changes_the_image_at_full_probability():
+    noise = PACSStyleNoise(p=1.0)
+    img = _solid_image()
+    out = noise(img)
+    assert not np.array_equal(np.array(out), np.array(img))
+
+
+def test_pacs_style_noise_preserves_size_and_mode():
+    noise = PACSStyleNoise(p=1.0)
+    img = _solid_image((96, 64))
+    out = noise(img)
+    assert out.size == (96, 64)
+    assert out.mode == "RGB"
+
+
+def test_pacs_style_noise_does_not_mutate_the_input_image():
+    noise = PACSStyleNoise(p=1.0)
+    img = _solid_image()
+    original = np.array(img).copy()
+    noise(img)
+    assert np.array_equal(np.array(img), original)
+
+
+def test_get_train_transforms_includes_pacs_style_noise():
+    train_tfm = get_train_transforms(image_size=32)
+    assert "PACSStyleNoise" in repr(train_tfm)
+    assert "PACSStyleNoise" not in repr(get_eval_transforms(image_size=32))

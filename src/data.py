@@ -7,6 +7,7 @@ from typing import Dict
 
 import matplotlib.pyplot as plt
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
@@ -15,6 +16,75 @@ from src.config import DataConfig
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+class PACSStyleNoise:
+    """Simulates the visual noise real-world MRI images actually have when
+    people find them online: burned-in scan-parameter text, scale rulers,
+    borders from multi-panel layouts, and tint shifts from old scans/photos of
+    film. None of this project's training data (Kaggle, BraTS, IXI) has any of
+    it -- every image is a clean, unannotated single slice -- so the model
+    never learned to ignore it. Confirmed with real online images this
+    session: the model was confidently *wrong* ("notumor") specifically on
+    images with this kind of overlay, and correct on clean ones of the same
+    tumor type. Train-time only -- eval/benchmark images shouldn't be
+    artificially corrupted, only made robust to real corruption.
+    """
+
+    _SAMPLE_TEXT = (
+        "TR: 4500.0", "TE: 109.0", "Mag: 1.5x", "HEAD", "FOV: 24.0cm",
+        "SER 1-5", "512 x 256", "W:976 L:488", "AR", "RHP", "ET: 16",
+    )
+    _TINTS = ((255, 230, 200), (200, 220, 255), (230, 200, 230))
+
+    def __init__(self, p: float = 0.35):
+        self.p = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+
+        img = img.copy()
+        w, h = img.size
+        noise_types = random.sample(["text", "ruler", "border", "tint"], k=random.randint(1, 3))
+
+        if "text" in noise_types:
+            draw = ImageDraw.Draw(img)
+            font = ImageFont.load_default()
+            for _ in range(random.randint(1, 3)):
+                text = random.choice(self._SAMPLE_TEXT)
+                x = random.choice([2, max(2, w - 80)])
+                y = random.choice([2, max(2, h - 15)])
+                color = random.choice([(255, 255, 255), (220, 220, 220)])
+                draw.text((x, y), text, fill=color, font=font)
+
+        if "ruler" in noise_types:
+            draw = ImageDraw.Draw(img)
+            side_x = random.choice([2, max(2, w - 6)])
+            tick_count = random.randint(8, 14)
+            for i in range(tick_count):
+                y = int(h * i / tick_count)
+                draw.line([(side_x, y), (side_x + 4, y)], fill=(255, 255, 255), width=1)
+
+        if "border" in noise_types:
+            draw = ImageDraw.Draw(img)
+            border_width = random.randint(4, 16)
+            border_color = random.choice([(0, 0, 0), (255, 255, 255)])
+            for side in random.sample(["left", "right", "top", "bottom"], k=random.randint(1, 2)):
+                if side == "left":
+                    draw.rectangle([0, 0, border_width, h], fill=border_color)
+                elif side == "right":
+                    draw.rectangle([w - border_width, 0, w, h], fill=border_color)
+                elif side == "top":
+                    draw.rectangle([0, 0, w, border_width], fill=border_color)
+                else:
+                    draw.rectangle([0, h - border_width, w, h], fill=border_color)
+
+        if "tint" in noise_types:
+            overlay = Image.new("RGB", img.size, random.choice(self._TINTS))
+            img = Image.blend(img.convert("RGB"), overlay, alpha=random.uniform(0.08, 0.2))
+
+        return img
 
 
 @dataclass
@@ -43,6 +113,11 @@ def get_train_transforms(image_size: int) -> transforms.Compose:
             transforms.RandomRotation(degrees=20),
             transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
             transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            # After the geometric transforms (not before) so any text/ruler/border
+            # added lands axis-aligned on the final canvas -- real PACS overlays are
+            # never rotated, so training the model to expect rotated overlays would
+            # teach the wrong invariance.
+            PACSStyleNoise(p=0.35),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
