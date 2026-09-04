@@ -87,6 +87,57 @@ class PACSStyleNoise:
         return img
 
 
+class MultiPanelComposite:
+    """Simulates real teaching-figure/PACS composites: 2 or 4 sub-panels of
+    brain-like content side by side in one frame, instead of one image filling
+    the whole canvas. Confirmed with a real failing image this session: a
+    glioma case that was wrong (confidently "notumor") turned out to be a
+    genuine 2-panel composite (coronal + axial side by side) -- no training
+    image, even with PACSStyleNoise added, had ever looked like that, since
+    text/ruler/tint noise alone doesn't change the fact that only half the
+    frame is the "real" view. Built from the *same* source image (no access to
+    other dataset samples from inside a single-image transform) -- each panel
+    gets independently flipped so panels don't look like exact duplicates,
+    which is the closest cheap approximation to genuinely different sub-views.
+    Applied after geometric transforms/crop so panels land on the final canvas.
+    """
+
+    def __init__(self, p: float = 0.25):
+        self.p = p
+
+    def _random_flip(self, panel: Image.Image) -> Image.Image:
+        if random.random() < 0.5:
+            panel = panel.transpose(Image.FLIP_LEFT_RIGHT)
+        if random.random() < 0.5:
+            panel = panel.transpose(Image.FLIP_TOP_BOTTOM)
+        return panel
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+
+        w, h = img.size
+        layout = random.choice(["2h", "2v", "4"])
+        canvas = Image.new("RGB", (w, h), (0, 0, 0))
+
+        if layout == "2h":
+            half_w = w // 2
+            canvas.paste(self._random_flip(img.resize((half_w, h))), (0, 0))
+            canvas.paste(self._random_flip(img.resize((w - half_w, h))), (half_w, 0))
+        elif layout == "2v":
+            half_h = h // 2
+            canvas.paste(self._random_flip(img.resize((w, half_h))), (0, 0))
+            canvas.paste(self._random_flip(img.resize((w, h - half_h))), (0, half_h))
+        else:  # "4"
+            half_w, half_h = w // 2, h // 2
+            quadrant = img.resize((half_w, half_h))
+            for qx in (0, half_w):
+                for qy in (0, half_h):
+                    canvas.paste(self._random_flip(quadrant), (qx, qy))
+
+        return canvas
+
+
 @dataclass
 class MRIDataBundle:
     train_loader: DataLoader
@@ -112,11 +163,22 @@ def get_train_transforms(image_size: int) -> transforms.Compose:
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(degrees=20),
             transforms.RandomAffine(degrees=0, translate=(0.05, 0.05)),
-            transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            # Widened from brightness/contrast=0.15 -- a real failing image this
+            # session (pituitary, wrong at ~65-100% "notumor" across every attempt
+            # so far) turned out to be a different acquisition/windowing style
+            # entirely, not just noisy decoration; 0.15 was nowhere near enough
+            # range to have ever produced anything that different at train time.
+            # RandomAutocontrast/RandomEqualize directly remap the intensity
+            # histogram (real torchvision ops, not custom code) -- a much closer
+            # analogue of "a different scanner's windowing" than brightness scaling.
+            transforms.ColorJitter(brightness=0.4, contrast=0.4),
+            transforms.RandomAutocontrast(p=0.3),
+            transforms.RandomEqualize(p=0.2),
             # After the geometric transforms (not before) so any text/ruler/border
             # added lands axis-aligned on the final canvas -- real PACS overlays are
             # never rotated, so training the model to expect rotated overlays would
             # teach the wrong invariance.
+            MultiPanelComposite(p=0.25),
             PACSStyleNoise(p=0.35),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),

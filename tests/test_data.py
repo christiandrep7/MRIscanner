@@ -9,6 +9,7 @@ from PIL import Image
 
 from src.config import DataConfig
 from src.data import (
+    MultiPanelComposite,
     PACSStyleNoise,
     _split_train_val_indices,
     build_dataloaders,
@@ -118,3 +119,42 @@ def test_get_train_transforms_includes_pacs_style_noise():
     train_tfm = get_train_transforms(image_size=32)
     assert "PACSStyleNoise" in repr(train_tfm)
     assert "PACSStyleNoise" not in repr(get_eval_transforms(image_size=32))
+
+
+def _gradient_image(size: tuple[int, int] = (128, 128)) -> Image.Image:
+    """A non-uniform image -- MultiPanelComposite's panels are built from this
+    same image, so a solid-color image can't tell a real composite apart from
+    a no-op (every panel would look identical either way)."""
+    w, h = size
+    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    arr[..., 0] = np.linspace(0, 255, w, dtype=np.uint8)[None, :]
+    arr[..., 1] = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
+    return Image.fromarray(arr, mode="RGB")
+
+
+def test_multi_panel_composite_never_applied_at_zero_probability():
+    composite = MultiPanelComposite(p=0.0)
+    img = _gradient_image()
+    out = composite(img)
+    assert np.array_equal(np.array(out), np.array(img))
+
+
+def test_multi_panel_composite_changes_the_image_at_full_probability():
+    composite = MultiPanelComposite(p=1.0)
+    img = _gradient_image()
+    out = composite(img)
+    assert not np.array_equal(np.array(out), np.array(img))
+
+
+def test_multi_panel_composite_preserves_size_and_mode():
+    composite = MultiPanelComposite(p=1.0)
+    img = _gradient_image((96, 64))
+    out = composite(img)
+    assert out.size == (96, 64)
+    assert out.mode == "RGB"
+
+
+def test_get_train_transforms_includes_multi_panel_composite():
+    train_tfm = get_train_transforms(image_size=32)
+    assert "MultiPanelComposite" in repr(train_tfm)
+    assert "MultiPanelComposite" not in repr(get_eval_transforms(image_size=32))
