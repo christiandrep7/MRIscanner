@@ -82,50 +82,66 @@ def _reclaim_disk_after_ixi_download(ixi_dir: Path) -> None:
         zip_path.unlink()
 
 
-def stage_download_external_raw() -> None:
-    if _stage_done("download_external_raw"):
-        print("[skip] BraTS/IXI raw downloads already present.")
+def stage_process_brats() -> None:
+    """Download, extract, and clean up BraTS as one atomic stage. Previously
+    download and extraction were separate stages, which meant BraTS's and
+    IXI's raw volumes -- even pruned to just t1ce+seg -- both sat on disk
+    simultaneously at the worst moment. Hit for real on a Colab run (113GB
+    disk, ~91GB used, Colab's own low-disk warning triggered): deleting each
+    dataset's raw volumes right after it's sliced, before the next download
+    starts, keeps peak usage to whichever single dataset is largest instead of
+    both combined."""
+    if _stage_done("process_brats"):
+        print("[skip] BraTS already downloaded and extracted.")
         return
     from kaggle.api.kaggle_api_extended import KaggleApi
 
     api = KaggleApi()
     api.authenticate()
-
     brats_dir = EXTERNAL_RAW_DIR / "brats"
-    ixi_dir = EXTERNAL_RAW_DIR / "ixi"
     brats_dir.mkdir(parents=True, exist_ok=True)
-    ixi_dir.mkdir(parents=True, exist_ok=True)
 
     print("[run] Downloading BraTS2020 (~7GB compressed; only 2 of 5 modalities are kept)...")
     api.dataset_download_files(BRATS_DATASET, path=str(brats_dir), unzip=True, quiet=False)
     _reclaim_disk_after_brats_download(brats_dir)
 
+    print("[run] Extracting glioma slices from BraTS...")
+    n_glioma = extract_brats_glioma_slices(brats_dir, EXTERNAL_SLICES_DIR / "glioma", slices_per_patient=6)
+    print(f"  -> {n_glioma} glioma slices")
+    assert n_glioma > 100, f"Only {n_glioma} glioma slices extracted -- check the BraTS download/layout."
+
+    print("[run] Freeing BraTS raw volumes (already sliced to PNG)...")
+    shutil.rmtree(brats_dir, ignore_errors=True)
+
+    _mark_stage_done("process_brats")
+
+
+def stage_process_ixi() -> None:
+    """Same reasoning as stage_process_brats -- download, extract, clean up,
+    in that order, before anything else starts."""
+    if _stage_done("process_ixi"):
+        print("[skip] IXI already downloaded and extracted.")
+        return
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+    ixi_dir = EXTERNAL_RAW_DIR / "ixi"
+    ixi_dir.mkdir(parents=True, exist_ok=True)
+
     print("[run] Downloading IXI (~4GB)...")
     api.dataset_download_files(IXI_DATASET, path=str(ixi_dir), unzip=True, quiet=False)
     _reclaim_disk_after_ixi_download(ixi_dir)
 
-    _mark_stage_done("download_external_raw")
-
-
-def stage_extract_slices() -> None:
-    if _stage_done("extract_slices"):
-        print("[skip] External slices already extracted.")
-        return
-    print("[run] Extracting glioma slices from BraTS...")
-    n_glioma = extract_brats_glioma_slices(
-        EXTERNAL_RAW_DIR / "brats", EXTERNAL_SLICES_DIR / "glioma", slices_per_patient=6
-    )
-    print(f"  -> {n_glioma} glioma slices")
     print("[run] Extracting notumor slices from IXI...")
-    n_notumor = extract_ixi_notumor_slices(
-        EXTERNAL_RAW_DIR / "ixi", EXTERNAL_SLICES_DIR / "notumor", slices_per_subject=4
-    )
+    n_notumor = extract_ixi_notumor_slices(ixi_dir, EXTERNAL_SLICES_DIR / "notumor", slices_per_subject=4)
     print(f"  -> {n_notumor} notumor slices")
-
-    assert n_glioma > 100, f"Only {n_glioma} glioma slices extracted -- check the BraTS download/layout."
     assert n_notumor > 100, f"Only {n_notumor} notumor slices extracted -- check the IXI download/layout."
 
-    _mark_stage_done("extract_slices")
+    print("[run] Freeing IXI raw volumes (already sliced to PNG)...")
+    shutil.rmtree(ixi_dir, ignore_errors=True)
+
+    _mark_stage_done("process_ixi")
 
 
 def stage_dedupe_and_merge() -> None:
@@ -174,7 +190,11 @@ def stage_dedupe_and_merge() -> None:
 def stage_cleanup_raw_downloads() -> None:
     if _stage_done("cleanup_raw"):
         return
-    print("[run] Freeing disk space (raw BraTS/IXI downloads no longer needed)...")
+    # BraTS/IXI raw volumes are already deleted per-dataset (see
+    # stage_process_brats/stage_process_ixi) -- this just clears the
+    # now-fully-consumed slice/dedupe intermediates and catches anything a
+    # partial/interrupted run left behind.
+    print("[run] Freeing disk space (extraction intermediates no longer needed)...")
     shutil.rmtree(EXTERNAL_RAW_DIR, ignore_errors=True)
     shutil.rmtree(EXTERNAL_SLICES_DIR, ignore_errors=True)
     shutil.rmtree(EXTERNAL_DEDUPED_DIR, ignore_errors=True)
@@ -213,8 +233,8 @@ def stage_benchmark() -> None:
 
 def main() -> None:
     stage_download_kaggle_dataset()
-    stage_download_external_raw()
-    stage_extract_slices()
+    stage_process_brats()
+    stage_process_ixi()
     stage_dedupe_and_merge()
     stage_cleanup_raw_downloads()
     stage_train_all()
