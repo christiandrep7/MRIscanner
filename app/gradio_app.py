@@ -16,6 +16,7 @@ from src.config import DataConfig
 from src.data import IMAGENET_MEAN, IMAGENET_STD
 from src.gradcam_utils import generate_gradcam_overlay
 from src.model import ARCHITECTURES, build_model, get_device
+from src.ood_detection import assess_reliability
 
 CHECKPOINT_DIR = Path("checkpoints")
 BENCHMARK_OUTPUT_DIR = Path("outputs") / "benchmark"
@@ -113,6 +114,24 @@ def _label_only(prediction_text: str) -> str | None:
     return prediction_text.split(" (")[0]
 
 
+def _reliability_message(image: Image.Image) -> str:
+    """Two real training attempts this session (augmentation targeting the
+    exact failure patterns found) didn't make the models robust to real-world
+    photos/screenshots -- this is the fallback: say up front when an input
+    doesn't look like the clean single MRI slices the models were trained on,
+    instead of letting a confident wrong answer pass as reliable. See
+    src/ood_detection.py for what's actually being measured."""
+    assessment = assess_reliability(image)
+    if not assessment.is_atypical:
+        return ""
+    reasons = "; ".join(assessment.reasons)
+    return (
+        f"⚠️ **This image doesn't look like a typical single MRI slice** ({reasons}). "
+        "The models were trained on clean scans, not real-world photos or screenshots -- "
+        "treat this prediction with caution."
+    )
+
+
 def _consensus_message(labels_by_architecture: dict[str, str | None]) -> str:
     predicted = {arch: label for arch, label in labels_by_architecture.items() if label is not None}
     if len(predicted) < 2:
@@ -207,6 +226,7 @@ def predict_all(image: Image.Image | None, selected_architectures: list[str], tr
         outputs.extend([label, overlay])
 
     messages = [
+        _reliability_message(image),
         _ground_truth_message(true_label, labels_by_architecture),
         _consensus_message(labels_by_architecture),
     ]

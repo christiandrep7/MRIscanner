@@ -371,3 +371,37 @@ def test_predict_all_no_ground_truth_line_for_manual_upload(fake_checkpoint: Pat
     outputs = gradio_app.predict_all(img, ["resnet50"])  # true_label defaults to None
 
     assert "True label" not in outputs[0]
+
+
+def test_reliability_message_empty_for_typical_image():
+    img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+    assert gradio_app._reliability_message(img) == ""
+
+
+def test_reliability_message_flags_atypical_image():
+    # Wide, tinted image with a busy corner -- same shape of failure as the
+    # real online images that exposed this problem this session.
+    arr = np.zeros((100, 300, 3), dtype=np.uint8)
+    arr[..., 0] = 200  # heavy red tint, far from grayscale
+    img = Image.fromarray(arr)
+    msg = gradio_app._reliability_message(img)
+    assert "doesn't look like a typical single MRI slice" in msg
+    assert "caution" in msg
+
+
+def test_predict_all_includes_reliability_warning_for_atypical_image(fake_checkpoint: Path, monkeypatch):
+    monkeypatch.setattr(gradio_app, "CHECKPOINT_DIR", fake_checkpoint.parent)
+    arr = np.zeros((100, 300, 3), dtype=np.uint8)
+    arr[..., 0] = 200
+
+    outputs = gradio_app.predict_all(Image.fromarray(arr), ["resnet50"])
+
+    assert "doesn't look like a typical single MRI slice" in outputs[0]
+
+
+def test_predict_all_no_reliability_warning_for_typical_image(fake_checkpoint: Path, monkeypatch):
+    monkeypatch.setattr(gradio_app, "CHECKPOINT_DIR", fake_checkpoint.parent)
+
+    outputs = gradio_app.predict_all(Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8)), ["resnet50"])
+
+    assert "doesn't look like a typical single MRI slice" not in outputs[0]
