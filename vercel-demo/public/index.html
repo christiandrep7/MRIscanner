@@ -179,9 +179,9 @@
   <div class="tab-panel" id="tab-benchmark">
     <div class="card">
       <p style="color: var(--muted); margin-top: 0;">
-        Runs the selected model(s) against the full held-out test set (1600 scans
-        none of them were trained on or used for checkpoint selection). Can take
-        a few minutes.
+        Runs the selected model(s) against the held-out Kaggle test set (1600 scans).
+        About 27% of those have a near-identical twin in the Kaggle training folder,
+        so this number reads higher than real-world accuracy. Can take a few minutes.
       </p>
       <div class="models-row">
         <label><input type="checkbox" class="bench-model" value="resnet50" checked /> resnet50</label>
@@ -200,8 +200,10 @@
   </div>
 
   <footer>
-    Three architectures compared: ResNet50 (95.0% held-out accuracy),
-    VGG16 (94.2%), EfficientNet-B0 (92.7%).
+    Three architectures compared. On 886 held-out Kaggle test scans that have no
+    near-duplicate in the training data: ResNet50 92.6%, VGG16 90.5%, EfficientNet-B0 87.6%.
+    Accuracy on scans from other scanners or from web screenshots is lower &mdash; this is a research demo,
+    not a diagnostic tool.
     <br />Source: <a href="https://github.com/christiandrep7/MRIscanner">github.com/christiandrep7/MRIscanner</a>
   </footer>
 </main>
@@ -408,7 +410,7 @@ benchmarkBtn.addEventListener('click', async () => {
     const startData = await startRes.json();
     if (!startRes.ok) throw new Error(startData.error || 'Failed to start benchmark');
 
-    benchStatusLine.textContent = 'Evaluating on 1600 held-out scans -- this can take several minutes...';
+    benchStatusLine.textContent = 'Evaluating on the 1600-scan held-out set -- this can take several minutes...';
     pollBenchmarkJob(startData.job_id);
   } catch (err) {
     benchStatusLine.innerHTML = `<span class="error">Error: ${err.message}</span>`;

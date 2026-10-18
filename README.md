@@ -6,10 +6,9 @@ side, with a Gradio UI for predictions, Grad-CAM explainability, model agreement
 checking, and benchmarking against a held-out test set.
 
 **🔴 Live demo (no install required):** https://vercel-demo-vert-eta.vercel.app —
-a lightweight single-model (EfficientNet-B0) version running on Vercel via ONNX Runtime.
-See [`vercel-demo/README.md`](vercel-demo/README.md) for why it's scoped down from the
-full app (Grad-CAM, all 3 models, and the benchmark tab need a persistent server, which
-serverless hosting can't provide). For the full experience, run it locally — see below.
+a Vercel relay (`vercel-demo/`) that forwards uploads to the same three-model backend.
+The relay submits jobs to the EC2 backend and polls for results (see
+[`vercel-demo/README.md`](vercel-demo/README.md)); you can also run the full app locally — see below.
 
 ## Quick start
 
@@ -35,8 +34,10 @@ python -m app.gradio_app
 Open **http://127.0.0.1:7860** and upload any MRI scan to get a prediction, confidence
 score, and Grad-CAM heatmap from each model — no dataset, no training, no GPU required.
 
-Held-out test accuracy for the published checkpoints: **ResNet50 95.0%**,
-**VGG16 94.2%**, **EfficientNet-B0 92.7%** (see [Comparing multiple architectures](#comparing-multiple-architectures)
+Accuracy of the published checkpoints on the 886 Kaggle test scans that have no
+near-duplicate in training: **ResNet50 92.6%**, **VGG16 90.5%**, **EfficientNet-B0 87.6%**.
+The raw 1600-image Kaggle test folder scores 95.0 / 94.2 / 92.7% but ~27% of it has a
+near-identical twin in the Kaggle training folder, so that figure is inflated (see [Comparing multiple architectures](#comparing-multiple-architectures)
 below for the full breakdown).
 
 **Note:** the **"🎲 Try a random never-seen scan"** button and the **Benchmark** tab both
@@ -94,8 +95,10 @@ Three backbones are supported: `resnet50`, `efficientnet_b0`, `vgg16`. Each trai
 its own checkpoint (`checkpoints/{architecture}_best_model.pth`) and history file
 (`outputs/{architecture}_metrics_history.csv`), so training one never overwrites another.
 
-**Published checkpoint results** (held-out test set, 1600 images none of them trained on
-or used for checkpoint selection):
+**Published checkpoint results** on the raw 1600-image Kaggle test folder. Caution: ~27%
+of these images have a near-identical twin in the Kaggle training folder (found by perceptual
+hashing, `src/leakage.py`), so these numbers are optimistic. Twin-free (n=886) accuracy:
+ResNet50 92.6%, VGG16 90.5%, EfficientNet-B0 87.6%.
 
 | Architecture | Accuracy | Macro F1 | Params | Speed (ms/image, Apple M3) |
 |---|---|---|---|---|
