@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 from src.config import DataConfig, TrainConfig
@@ -40,6 +41,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
     false_negative_penalty: tuple[int, float] | None = None,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[float, float]:
     """`false_negative_penalty`, if given, is (class_idx, weight): adds
     weight * mean(softmax_prob[:, class_idx]) over rows whose true label is NOT
@@ -60,20 +62,27 @@ def run_epoch(
         images = images.to(device)
         labels = labels.to(device)
 
-        with torch.set_grad_enabled(is_train):
+        with torch.set_grad_enabled(is_train), torch.autocast(
+            device_type=device.type, dtype=torch.float16, enabled=scaler is not None
+        ):
             logits = model(images)
-            loss = criterion(logits, labels)
+            loss = criterion(logits.float(), labels)
             if false_negative_penalty is not None:
                 penalty_idx, penalty_weight = false_negative_penalty
                 if penalty_weight > 0:
                     is_other_class = labels != penalty_idx
                     if is_other_class.any():
-                        probs = torch.softmax(logits, dim=1)
+                        probs = torch.softmax(logits.float(), dim=1)
                         loss = loss + penalty_weight * probs[is_other_class, penalty_idx].mean()
             if is_train:
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
         preds = torch.argmax(logits, dim=1)
         total_correct += (preds == labels).sum().item()
@@ -127,11 +136,29 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
     model = build_model(
         train_cfg.architecture,
         num_classes=len(bundle.class_to_idx),
+        fine_tune_layers=train_cfg.fine_tune_layers,
         pretrained=train_cfg.pretrained,
         imagenet_weights_path=train_cfg.imagenet_weights_path,
     ).to(device)
+    if train_cfg.init_checkpoint is not None:
+        init = torch.load(train_cfg.init_checkpoint, map_location=device, weights_only=False)
+        if init["class_to_idx"] != bundle.class_to_idx:
+            raise ValueError(
+                f"init_checkpoint classes {init['class_to_idx']} != dataset classes {bundle.class_to_idx}"
+            )
+        model.load_state_dict(init["model_state_dict"])
+        print(f"Continuing from {train_cfg.init_checkpoint} (weights loaded, optimizer fresh).")
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = Adam(trainable_params, lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
+    scheduler = (
+        ReduceLROnPlateau(
+            optimizer, mode="min", factor=train_cfg.lr_plateau_factor,
+            patience=train_cfg.lr_plateau_patience, min_lr=train_cfg.min_learning_rate,
+        )
+        if train_cfg.lr_plateau_patience > 0
+        else None
+    )
+    scaler = torch.amp.GradScaler("cuda") if train_cfg.use_amp and device.type == "cuda" else None
 
     # Per-class weight tensor, resolved by name against this dataset's actual
     # class_to_idx (never assume alphabetical order lines up with a hardcoded list).
@@ -160,6 +187,8 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
         if resume_state.get("architecture") == train_cfg.architecture:
             model.load_state_dict(resume_state["model_state_dict"])
             optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+            if scheduler is not None and resume_state.get("scheduler_state_dict"):
+                scheduler.load_state_dict(resume_state["scheduler_state_dict"])
             best_val_loss = resume_state["best_val_loss"]
             patience_counter = resume_state["patience_counter"]
             history = resume_state["history"]
@@ -169,9 +198,27 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
                 f"(best_val_loss so far: {best_val_loss:.6f})"
             )
 
+    if train_cfg.init_checkpoint is not None and start_epoch == 1:
+        # The starting weights are the bar to beat: only epochs whose val loss is
+        # lower replace them, so continued training can never silently make the
+        # saved model worse on the validation data.
+        baseline_loss, baseline_acc = run_epoch(model, bundle.val_loader, criterion, None, device, false_negative_penalty)
+        print(f"Baseline (starting weights) on validation: loss={baseline_loss:.6f} acc={baseline_acc:.4f}")
+        best_val_loss = baseline_loss
+        torch.save(
+            {
+                "architecture": train_cfg.architecture,
+                "model_state_dict": model.state_dict(),
+                "class_to_idx": bundle.class_to_idx,
+                "data_config": _json_safe(asdict(data_cfg)),
+                "train_config": _json_safe(asdict(train_cfg)),
+            },
+            best_ckpt_path,
+        )
+
     for epoch in range(start_epoch, train_cfg.epochs + 1):
         train_loss, train_acc = run_epoch(
-            model, bundle.train_loader, criterion, optimizer, device, false_negative_penalty
+            model, bundle.train_loader, criterion, optimizer, device, false_negative_penalty, scaler
         )
         val_loss, val_acc = run_epoch(
             model, bundle.val_loader, criterion, None, device, false_negative_penalty
@@ -183,9 +230,13 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
             "train_accuracy": round(train_acc, 6),
             "val_loss": round(val_loss, 6),
             "val_accuracy": round(val_acc, 6),
+            "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(epoch_row)
         print(epoch_row)
+
+        if scheduler is not None:
+            scheduler.step(val_loss)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -203,24 +254,26 @@ def train(data_cfg: DataConfig, train_cfg: TrainConfig) -> Path:
         else:
             patience_counter += 1
 
-        # Saved every epoch regardless of improvement -- if training is
-        # interrupted (sleep, crash, power loss) between here and the next
-        # epoch's end, re-running train() picks up from epoch+1 instead of
-        # starting the whole architecture over.
-        torch.save(
-            {
-                "architecture": train_cfg.architecture,
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "best_val_loss": best_val_loss,
-                "patience_counter": patience_counter,
-                "history": history,
-            },
-            resume_path,
-        )
+        # Saved every `resume_save_every` epochs regardless of improvement -- if
+        # training is interrupted (sleep, crash, power loss) re-running train()
+        # picks up from the last saved epoch instead of starting over.
+        should_stop = patience_counter >= train_cfg.early_stopping_patience
+        if epoch % train_cfg.resume_save_every == 0 or should_stop or epoch == train_cfg.epochs:
+            torch.save(
+                {
+                    "architecture": train_cfg.architecture,
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                    "best_val_loss": best_val_loss,
+                    "patience_counter": patience_counter,
+                    "history": history,
+                },
+                resume_path,
+            )
 
-        if patience_counter >= train_cfg.early_stopping_patience:
+        if should_stop:
             print(
                 f"Early stopping at epoch {epoch} (no val loss improvement for "
                 f"{train_cfg.early_stopping_patience} epochs)."

@@ -40,7 +40,7 @@ def test_train_writes_checkpoint_and_history(tiny_data_config: DataConfig, tiny_
         rows = list(csv.DictReader(f))
     assert len(rows) == tiny_train_config.epochs
     for row in rows:
-        assert set(row.keys()) == {"epoch", "train_loss", "train_accuracy", "val_loss", "val_accuracy"}
+        assert set(row.keys()) == {"epoch", "train_loss", "train_accuracy", "val_loss", "val_accuracy", "lr"}
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)

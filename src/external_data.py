@@ -156,9 +156,96 @@ def extract_ixi_notumor_slices(
     return written
 
 
+def flair_tumor_slice_indices(flair: np.ndarray, k: int) -> list[int]:
+    """Axial slices that very likely contain tumor, chosen from a FLAIR volume
+    alone (BraTS *validation* patients ship no segmentation mask). A slice scores
+    by how many brain voxels are > mean + 2 SD of the volume's brain intensities --
+    FLAIR makes edema/tumor bright. Candidates scoring >= 70% of the best slice are
+    spread evenly to k picks. Measured on 12 BraTS training patients with real
+    masks: 96/96 picked slices (k=8) contained >= 150 tumor pixels."""
+    brain = flair > 0
+    if not brain.any():
+        return []
+    mu, sd = flair[brain].mean(), flair[brain].std()
+    score = ((flair > mu + 2.0 * sd) & brain).sum(axis=(0, 1)).astype(float)
+    brain_area = brain.sum(axis=(0, 1))
+    score[brain_area < 0.3 * brain_area.max()] = 0  # skip mostly-empty top/bottom slices
+    if score.max() <= 0:
+        return []
+    candidates = np.where(score >= 0.7 * score.max())[0]
+    picks = np.linspace(0, len(candidates) - 1, min(k, len(candidates)))
+    return sorted({int(candidates[int(round(i))]) for i in picks})
+
+
+def extract_brats_validation_glioma_slices(brats_root: Path, out_dir: Path, slices_per_patient: int = 8) -> int:
+    """BraTS 2020 validation patients (never used by the original training run):
+    t1ce for the image, FLAIR to pick tumor slices (no seg mask is released)."""
+    written = 0
+    for patient_dir in sorted(p for p in brats_root.rglob("BraTS20_Validation_*") if p.is_dir()):
+        pid = patient_dir.name
+        t1ce_path, flair_path = patient_dir / f"{pid}_t1ce.nii", patient_dir / f"{pid}_flair.nii"
+        if not t1ce_path.exists() or not flair_path.exists():
+            continue
+        t1ce, flair = _load_axial_volume(t1ce_path), _load_axial_volume(flair_path)
+        for idx in flair_tumor_slice_indices(flair, slices_per_patient):
+            _save_axial_slice(t1ce, idx, out_dir / f"{pid}_slice{idx}.png")
+            written += 1
+    return written
+
+
+_OASIS_RE = re.compile(r"^(OAS1_\d+)_MR\d_(\d+)_nii_slice_(\d+)_png")
+
+
+def extract_oasis_notumor_slices(oasis_root: Path, out_dir: Path, slices_per_subject: int = 8) -> int:
+    """OASIS-1 healthy controls (CDR 0, folder NonDemented) from the Roboflow export
+    of OASIS. These are skull-stripped T1 slices -- exactly what BraTS glioma slices
+    look like, which is the point: healthy skull-stripped examples stop the model
+    from learning 'no skull = glioma'. Picks evenly spaced slices per subject."""
+    by_subject: dict[str, list[Path]] = {}
+    for split in ("train", "test"):
+        for f in sorted((oasis_root / split / "NonDemented").glob("*.jpg")):
+            m = _OASIS_RE.match(f.name)
+            if m:
+                by_subject.setdefault(m.group(1), []).append(f)
+    written = 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for subject, files in sorted(by_subject.items()):
+        files.sort(key=lambda f: (int(_OASIS_RE.match(f.name).group(2)), int(_OASIS_RE.match(f.name).group(3))))
+        picks = np.linspace(0, len(files) - 1, min(slices_per_subject, len(files)))
+        for i in sorted({int(round(x)) for x in picks}):
+            scan, sl = _OASIS_RE.match(files[i].name).group(2, 3)
+            with Image.open(files[i]) as im:
+                im.convert("RGB").save(out_dir / f"{subject}_scan{scan}_slice{sl}.png")
+            written += 1
+    return written
+
+
+PMRAM_CLASS_DIRS = {"512Glioma": "glioma", "512Meningioma": "meningioma", "512Pituitary": "pituitary", "512Normal": "notumor"}
+
+
+def extract_pmram_images(pmram_root: Path, out_root: Path) -> dict[str, int]:
+    """PMRAM (Bangladeshi hospital MRI, 4 classes). Only the *Raw* images are used:
+    the 'Augmented' folder is made from the raw ones, so mixing both would put
+    copies of the same scan on both sides of any split. No patient ids exist, so
+    callers must split with src.leakage.split_clusters. Returns counts per class."""
+    counts: dict[str, int] = {}
+    for src_name, class_name in PMRAM_CLASS_DIRS.items():
+        files = sorted(d for d in pmram_root.rglob(src_name) if d.is_dir() and d.parent.name == "Raw")
+        n = 0
+        for d in files:
+            for f in sorted(d.glob("*.jpg")):
+                dest = out_root / class_name / f"PMRAM_{class_name}_{n:04d}.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with Image.open(f) as im:
+                    im.convert("RGB").save(dest)
+                n += 1
+        counts[class_name] = n
+    return counts
+
+
 # Every extracted slice is named <patient>_slice<N>.png, so the patient a slice
 # came from can always be recovered from the filename alone.
-_PATIENT_RE = re.compile(r"^(BraTS20_Training_\d+|IXI\d+)_slice\d+\.png$")
+_PATIENT_RE = re.compile(r"^(BraTS20_(?:Training|Validation)_\d+|IXI\d+|OAS1_\d+)(?:_scan\d+)?_slice\d+\.png$")
 
 
 def patient_id_of(path: Path | str) -> str | None:
@@ -208,3 +295,37 @@ def find_patient_overlap(dir_a: Path, dir_b: Path) -> set[str]:
     Should be empty for any train/test pair."""
     ids = lambda root: {pid for f in Path(root).rglob("*.png") if (pid := patient_id_of(f))}
     return ids(dir_a) & ids(dir_b)
+
+
+def split_dir_by_patient_fractions(
+    src_dir: Path, dests: dict[str, Path], fractions: dict[str, float], seed: int
+) -> dict[str, int]:
+    """Moves slices from src_dir into the named destination folders, giving each
+    *whole patient* to one bucket (generalises split_by_patient to N buckets,
+    e.g. train / val / test). Returns the slice count per bucket."""
+    by_patient: dict[str, list[Path]] = {}
+    for img in sorted(src_dir.glob("*.png")):
+        pid = patient_id_of(img)
+        if pid is None:
+            raise ValueError(f"Can't tell which patient {img.name} belongs to; refusing to split by slice.")
+        by_patient.setdefault(pid, []).append(img)
+
+    patients = sorted(by_patient)
+    random.Random(seed).shuffle(patients)
+    names = list(fractions)
+    assignment: dict[str, str] = {}
+    start = 0
+    for i, name in enumerate(names):
+        count = len(patients) - start if i == len(names) - 1 else round(len(patients) * fractions[name])
+        for pid in patients[start : start + count]:
+            assignment[pid] = name
+        start += count
+
+    counts = {name: 0 for name in names}
+    for pid, imgs in by_patient.items():
+        dest = dests[assignment[pid]]
+        dest.mkdir(parents=True, exist_ok=True)
+        for img in imgs:
+            img.rename(dest / img.name)
+        counts[assignment[pid]] += len(imgs)
+    return counts

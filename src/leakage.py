@@ -15,6 +15,7 @@ extra training images -- it can't make the test set easier.
 from __future__ import annotations
 
 import shutil
+from functools import lru_cache
 from pathlib import Path
 
 import imagehash
@@ -29,9 +30,16 @@ def _images(root: Path) -> list[Path]:
     return sorted(p for p in Path(root).rglob("*") if p.is_file() and p.suffix.lower() in _IMAGE_EXT)
 
 
-def _phash(path: Path) -> int:
+@lru_cache(maxsize=None)
+def _phash_cached(path: Path, mtime_ns: int) -> int:
     with Image.open(path) as im:
         return int(str(imagehash.phash(im.convert("RGB"))), 16)
+
+
+def _phash(path: Path) -> int:
+    # keyed on mtime so an edited file is rehashed; repeated gate checks over the
+    # same ~20k images then cost one pass, not one per eval folder
+    return _phash_cached(Path(path), Path(path).stat().st_mtime_ns)
 
 
 def _hamming_matrix(a: np.ndarray, b: np.ndarray, chunk: int = 256) -> np.ndarray:
@@ -80,3 +88,52 @@ def quarantine_train_duplicates_of_test(
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
     return len(to_move)
+
+
+def cluster_by_similarity(paths: list[Path], max_hamming: int = 10) -> list[list[Path]]:
+    """Connected components of images whose pHash distance is <= max_hamming.
+    Datasets without patient ids (Kaggle, PMRAM) still contain several slices or
+    re-saves of the same scan; keeping each component on one side of a split
+    stops those look-alikes from straddling train and test."""
+    if not paths:
+        return []
+    hashes = np.array([_phash(p) for p in paths], dtype=np.uint64)
+    parent = list(range(len(paths)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for start in range(0, len(paths), 256):
+        block = _hamming_matrix(hashes[start : start + 256], hashes)
+        for row, i in enumerate(range(start, min(start + 256, len(paths)))):
+            for j in np.where(block[row] <= max_hamming)[0]:
+                ri, rj = find(i), find(int(j))
+                if ri != rj:
+                    parent[rj] = ri
+    groups: dict[int, list[Path]] = {}
+    for i, p in enumerate(paths):
+        groups.setdefault(find(i), []).append(p)
+    return list(groups.values())
+
+
+def split_clusters(
+    paths: list[Path], fractions: dict[str, float], seed: int, max_hamming: int = 10
+) -> dict[str, list[Path]]:
+    """Assigns whole similarity clusters to named buckets in roughly the given
+    proportions (fractions need not be exact -- clusters are indivisible)."""
+    import random
+
+    clusters = cluster_by_similarity(paths, max_hamming)
+    random.Random(seed).shuffle(clusters)
+    total = sum(len(c) for c in clusters)
+    names = list(fractions)
+    targets = {n: fractions[n] * total for n in names}
+    buckets: dict[str, list[Path]] = {n: [] for n in names}
+    for cluster in sorted(clusters, key=len, reverse=True):
+        # place into the bucket furthest below its target share
+        name = max(names, key=lambda n: targets[n] - len(buckets[n]))
+        buckets[name].extend(cluster)
+    return buckets

@@ -12,6 +12,12 @@ class DataConfig:
     num_workers: int = 2
     val_split: float = 0.15
     seed: int = 42
+    # Optional separate Validation folder. When it exists it replaces the carve-out
+    # from Training -- needed when fine-tuning from an existing checkpoint, because
+    # that checkpoint already saw (most of) Training and a val split cut from it
+    # would measure memory, not generalization.
+    val_dir_name: str = "Validation"
+    balanced_sampling: bool = False
 
 
 @dataclass
@@ -42,6 +48,18 @@ class TrainConfig:
     false_negative_penalty_class: str = "notumor"
     false_negative_penalty_weight: float = 0.5
     early_stopping_patience: int = 5
+    # Continue training from an existing checkpoint's weights instead of ImageNet.
+    init_checkpoint: Path | None = None
+    # ReduceLROnPlateau on val loss: 0 disables. Lets a long run keep improving
+    # instead of stalling at one learning rate.
+    lr_plateau_patience: int = 0
+    lr_plateau_factor: float = 0.5
+    min_learning_rate: float = 1e-7
+    fine_tune_layers: int = 2  # trailing backbone blocks left trainable (+ head)
+    # Write the (large) resume state every N epochs. 1 = every epoch (default, loses <=1
+    # epoch on interruption); raise it when the state lives on slow storage like Google Drive.
+    resume_save_every: int = 1
+    use_amp: bool = False  # CUDA mixed precision (faster on Colab GPUs)
     checkpoint_dir: Path = Path("checkpoints")
     history_dir: Path = Path("outputs")
     # ImageNet backbone: False = random init (slow); True = pretrained or local file / hub cache

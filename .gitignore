@@ -30,3 +30,10 @@ Thumbs.db
 .claude/
 .claudeignore
 brain/
+external_new/
+pipeline_state_v2/
+work_v2/
+benchmark_v2/
+checkpoints_start/
+checkpoints_v2/
+outputs_v2/

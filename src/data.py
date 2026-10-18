@@ -8,7 +8,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import torch
 from PIL import Image, ImageDraw, ImageFont
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchvision import datasets, transforms
 
 from src.config import DataConfig
@@ -234,6 +234,15 @@ def _split_train_val_indices_grouped(
     return sorted(train_indices), sorted(val_indices)
 
 
+def _balanced_sampler(targets: list[int], seed: int) -> WeightedRandomSampler:
+    """Draws len(targets) samples per epoch with every class equally likely, so a
+    class that is 46% of the files (notumor) no longer dominates the gradient."""
+    counts = torch.bincount(torch.tensor(targets))
+    weights = (1.0 / counts.float())[torch.tensor(targets)]
+    generator = torch.Generator().manual_seed(seed)
+    return WeightedRandomSampler(weights, num_samples=len(targets), replacement=True, generator=generator)
+
+
 def build_dataloaders(config: DataConfig) -> MRIDataBundle:
     train_dir = config.data_root / config.train_dir_name
     test_dir = config.data_root / config.test_dir_name
@@ -247,19 +256,33 @@ def build_dataloaders(config: DataConfig) -> MRIDataBundle:
     full_train_for_eval = datasets.ImageFolder(train_dir, transform=get_eval_transforms(config.image_size))
     test_dataset = datasets.ImageFolder(test_dir, transform=get_eval_transforms(config.image_size))
 
-    train_indices, val_indices = _split_train_val_indices_grouped(
-        [patient_id_of(path) for path, _ in full_train_for_aug.samples],
-        val_split=config.val_split,
-        seed=config.seed,
-    )
+    val_dir = config.data_root / config.val_dir_name
+    if val_dir.exists():
+        # Dedicated validation folder (see DataConfig.val_dir_name): train on everything in Training.
+        train_subset = full_train_for_aug
+        val_subset = datasets.ImageFolder(val_dir, transform=get_eval_transforms(config.image_size))
+        if val_subset.class_to_idx != full_train_for_aug.class_to_idx:
+            raise ValueError(
+                f"Validation classes {val_subset.class_to_idx} differ from Training classes "
+                f"{full_train_for_aug.class_to_idx}"
+            )
+        train_targets = list(full_train_for_aug.targets)
+    else:
+        train_indices, val_indices = _split_train_val_indices_grouped(
+            [patient_id_of(path) for path, _ in full_train_for_aug.samples],
+            val_split=config.val_split,
+            seed=config.seed,
+        )
+        train_subset = Subset(full_train_for_aug, train_indices)
+        val_subset = Subset(full_train_for_eval, val_indices)
+        train_targets = [full_train_for_aug.targets[i] for i in train_indices]
 
-    train_subset = Subset(full_train_for_aug, train_indices)
-    val_subset = Subset(full_train_for_eval, val_indices)
-
+    sampler = _balanced_sampler(train_targets, config.seed) if config.balanced_sampling else None
     train_loader = DataLoader(
         train_subset,
         batch_size=config.batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=config.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
