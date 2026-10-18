@@ -294,9 +294,30 @@ def stage_assemble_data(paths: Paths) -> None:
 
 
 # ---------------------------------------------------------------- stage 4
+def _drop_validation_images_with_test_twins(paths: Paths, test_dirs: dict[str, Path]) -> int:
+    val_root = paths.data / "Validation"
+    twins: set[Path] = set()
+    for test_root in test_dirs.values():
+        if test_root.exists():
+            twins |= {
+                f for f in find_test_images_with_train_duplicates(test_root, val_root, GATE_MAX_HAMMING)
+                if patient_id_of(f) is None  # patient-id sources are separated by patient instead
+            }
+    for f in twins:
+        dest = paths.data / "_excluded_leaky_eval" / "Validation" / f.relative_to(val_root)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        f.rename(dest)
+    return len(twins)
+
+
 def stage_gate(paths: Paths) -> None:
     eval_dirs = {name: paths.data / name for name in ("Validation",) + TEST_DIRS}
     test_dirs = {k: eval_dirs[k] for k in TEST_DIRS}
+    # Validation is expendable, the frozen test sets are not: any Validation image that
+    # looks like a test image is moved aside (never the other way round).
+    dropped = _drop_validation_images_with_test_twins(paths, test_dirs)
+    if dropped:
+        print(f"[gate] moved {dropped} Validation images that resemble a test image out of Validation")
     report = assert_no_leakage(paths.data / "Training", list(eval_dirs.values()), GATE_MAX_HAMMING)
     # validation drives early stopping, so it must not overlap the reported test sets either
     assert_no_leakage(eval_dirs["Validation"], list(test_dirs.values()), GATE_MAX_HAMMING)

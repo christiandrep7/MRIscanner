@@ -153,3 +153,12 @@ def test_old_external_data_is_rebuilt_into_training_on_a_fresh_machine(tmp_path:
     # already present -> nothing is re-downloaded
     monkeypatch.setattr(old, "stage_process_brats", lambda: pytest.fail("should not re-run"))
     rct._ensure_old_external_data_in_training(tmp_path / "data")
+
+
+def test_gate_moves_a_validation_lookalike_of_a_test_image_instead_of_failing(world: rct.Paths):
+    rct.stage_assemble_data(world)
+    test_img = next((world.data / "Testing" / "glioma").glob("*.jpg"))
+    _save(Image.open(test_img).resize((80, 80)), world.data / "Validation" / "glioma" / "val_lookalike.jpg")
+    rct.stage_gate(world)  # must not raise
+    assert "val_lookalike.jpg" not in _all_files(world.data / "Validation")
+    assert test_img.exists()
