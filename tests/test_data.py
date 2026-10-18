@@ -12,6 +12,7 @@ from src.data import (
     MultiPanelComposite,
     PACSStyleNoise,
     _split_train_val_indices,
+    _split_train_val_indices_grouped,
     build_dataloaders,
     get_eval_transforms,
     get_train_transforms,
@@ -158,3 +159,23 @@ def test_get_train_transforms_includes_multi_panel_composite():
     train_tfm = get_train_transforms(image_size=32)
     assert "MultiPanelComposite" in repr(train_tfm)
     assert "MultiPanelComposite" not in repr(get_eval_transforms(image_size=32))
+
+
+def test_grouped_split_keeps_each_patient_on_one_side():
+    # 20 patients x 5 slices, interleaved so a naive index split would mix them
+    keys = [f"p{i % 20}" for i in range(100)]
+    train, val = _split_train_val_indices_grouped(keys, val_split=0.2, seed=3)
+    assert set(train).isdisjoint(val) and len(train) + len(val) == 100
+    assert {keys[i] for i in train}.isdisjoint({keys[i] for i in val})
+    assert 15 <= len(val) <= 30
+
+
+def test_grouped_split_treats_keyless_items_as_independent():
+    keys = [None] * 50
+    train, val = _split_train_val_indices_grouped(keys, val_split=0.2, seed=0)
+    assert len(val) == 10 and len(train) == 40
+
+
+def test_grouped_split_is_deterministic_for_seed():
+    keys = [f"p{i % 7}" if i % 3 else None for i in range(60)]
+    assert _split_train_val_indices_grouped(keys, 0.2, 5) == _split_train_val_indices_grouped(keys, 0.2, 5)

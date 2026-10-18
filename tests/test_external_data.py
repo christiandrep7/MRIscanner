@@ -6,7 +6,13 @@ import nibabel as nib
 import numpy as np
 from PIL import Image
 
-from src.external_data import extract_brats_glioma_slices, extract_ixi_notumor_slices
+from src.external_data import (
+    extract_brats_glioma_slices,
+    extract_ixi_notumor_slices,
+    find_patient_overlap,
+    patient_id_of,
+    split_by_patient,
+)
 
 
 def _save_nii(volume: np.ndarray, path: Path) -> None:
@@ -102,3 +108,72 @@ def test_extract_ixi_notumor_slices_respects_max_subjects(tmp_path: Path):
     written = extract_ixi_notumor_slices(ixi_root, out_dir, slices_per_subject=2, max_subjects=1)
 
     assert written == 2
+
+
+def _touch_slices(folder: Path, patient: str, n: int) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (folder / f"{patient}_slice{i}.png").write_bytes(b"x")
+
+
+def test_patient_id_of_handles_brats_ixi_and_unknown_names():
+    assert patient_id_of("BraTS20_Training_042_slice77.png") == "BraTS20_Training_042"
+    assert patient_id_of(Path("x/IXI013_slice46.png")) == "IXI013"
+    assert patient_id_of("Tr-gl_0012.jpg") is None  # Kaggle files carry no patient id
+
+
+def test_split_by_patient_never_puts_a_patient_on_both_sides(tmp_path: Path):
+    src = tmp_path / "src"
+    for i in range(30):
+        _touch_slices(src, f"BraTS20_Training_{i:03d}", 6)
+    train, test = tmp_path / "train", tmp_path / "test"
+
+    n_train, n_test = split_by_patient(src, train, test, test_fraction=0.2, seed=1)
+
+    assert n_train + n_test == 180
+    train_ids = {patient_id_of(p) for p in train.glob("*.png")}
+    test_ids = {patient_id_of(p) for p in test.glob("*.png")}
+    assert train_ids and test_ids
+    assert train_ids.isdisjoint(test_ids)
+    assert len(test_ids) == 6  # 20% of 30 patients
+    assert find_patient_overlap(train, test) == set()
+
+
+def test_split_by_patient_keeps_all_slices_of_a_patient_together(tmp_path: Path):
+    src = tmp_path / "src"
+    for i in range(10):
+        _touch_slices(src, f"IXI{i:03d}", 4)
+    train, test = tmp_path / "train", tmp_path / "test"
+    split_by_patient(src, train, test, test_fraction=0.3, seed=0)
+    for pid in {patient_id_of(p) for p in test.glob("*.png")}:
+        assert len(list(test.glob(f"{pid}_slice*.png"))) == 4
+        assert not list(train.glob(f"{pid}_slice*.png"))
+
+
+def test_split_by_patient_is_deterministic(tmp_path: Path):
+    def run(tag: str) -> set[str]:
+        src = tmp_path / f"src_{tag}"
+        for i in range(20):
+            _touch_slices(src, f"IXI{i:03d}", 2)
+        test = tmp_path / f"test_{tag}"
+        split_by_patient(src, tmp_path / f"train_{tag}", test, test_fraction=0.25, seed=7)
+        return {p.name for p in test.glob("*.png")}
+    assert run("a") == run("b")
+
+
+def test_split_by_patient_rejects_unparseable_filenames(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "mystery.png").write_bytes(b"x")
+    import pytest
+    with pytest.raises(ValueError, match="patient"):
+        split_by_patient(src, tmp_path / "train", tmp_path / "test", test_fraction=0.2, seed=0)
+
+
+def test_find_patient_overlap_detects_the_original_leak(tmp_path: Path):
+    """The shuffle-all-slices bug: same patient's slices on both sides."""
+    train, test = tmp_path / "train", tmp_path / "test"
+    _touch_slices(train, "BraTS20_Training_001", 4)
+    _touch_slices(test, "BraTS20_Training_001", 2)
+    _touch_slices(test, "BraTS20_Training_002", 2)
+    assert find_patient_overlap(train, test) == {"BraTS20_Training_001"}

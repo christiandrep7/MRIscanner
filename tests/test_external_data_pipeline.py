@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 
 import run_external_data_pipeline as pipeline
+from src.external_data import find_patient_overlap
 
 
 def _make_png(path: Path, seed: int) -> None:
@@ -64,16 +65,21 @@ def test_stage_dedupe_and_merge_splits_and_skips_when_done(tmp_path: Path, monke
     monkeypatch.setattr(pipeline, "EXTERNAL_DEDUPED_DIR", tmp_path / "external_deduped")
     monkeypatch.setattr(pipeline, "EXTERNAL_TEST_FRACTION", 0.2)
 
-    # 10 brand-new glioma slices, none overlapping the (empty) existing dataset.
-    for i in range(10):
-        _make_png(tmp_path / "external_raw_slices" / "glioma" / f"img{i}.png", seed=i)
+    # 10 patients x 3 slices, none overlapping the (empty) existing dataset.
+    for patient in range(10):
+        for sl in range(3):
+            _make_png(
+                tmp_path / "external_raw_slices" / "glioma" / f"BraTS20_Training_{patient:03d}_slice{sl}.png",
+                seed=patient * 10 + sl,
+            )
 
     pipeline.stage_dedupe_and_merge()
 
     train_images = list((tmp_path / "data" / "Training" / "glioma").glob("*.png"))
     test_images = list((tmp_path / "data" / "ExternalTesting" / "glioma").glob("*.png"))
-    assert len(train_images) + len(test_images) == 10
-    assert len(test_images) == 2  # 20% of 10
+    assert len(train_images) + len(test_images) == 30
+    assert len(test_images) == 6  # 20% of 10 patients, all 3 slices of each
+    assert find_patient_overlap(tmp_path / "data" / "Training", tmp_path / "data" / "ExternalTesting") == set()
     assert pipeline._stage_done("dedupe_and_merge")
 
     # Re-running should skip (no-op) rather than re-splitting already-moved files.
@@ -87,9 +93,9 @@ def test_stage_dedupe_and_merge_drops_exact_duplicate_of_existing_image(tmp_path
     monkeypatch.setattr(pipeline, "EXTERNAL_SLICES_DIR", tmp_path / "external_raw_slices")
     monkeypatch.setattr(pipeline, "EXTERNAL_DEDUPED_DIR", tmp_path / "external_deduped")
 
-    _make_png(tmp_path / "data" / "Training" / "glioma" / "existing.png", seed=42)
-    _make_png(tmp_path / "external_raw_slices" / "glioma" / "duplicate.png", seed=42)  # byte-identical
-    _make_png(tmp_path / "external_raw_slices" / "glioma" / "genuinely_new.png", seed=99)
+    _make_png(tmp_path / "data" / "Training" / "glioma" / "BraTS20_Training_900_slice1.png", seed=42)
+    _make_png(tmp_path / "external_raw_slices" / "glioma" / "BraTS20_Training_901_slice1.png", seed=42)  # byte-identical
+    _make_png(tmp_path / "external_raw_slices" / "glioma" / "BraTS20_Training_902_slice1.png", seed=99)
 
     pipeline.stage_dedupe_and_merge()
 
@@ -100,5 +106,27 @@ def test_stage_dedupe_and_merge_drops_exact_duplicate_of_existing_image(tmp_path
         p.name
         for p in (tmp_path / "data" / "ExternalTesting" / "glioma").glob("*.png")
     }
-    assert "duplicate.png" not in merged_names
-    assert "genuinely_new.png" in merged_names
+    assert "BraTS20_Training_901_slice1.png" not in merged_names
+    assert "BraTS20_Training_902_slice1.png" in merged_names
+
+
+def test_stage_remove_train_test_duplicates_quarantines_train_side_only(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path / "pipeline_state")
+
+    rng = np.random.default_rng(5)
+    base = Image.fromarray(rng.integers(0, 255, (8, 8), dtype=np.uint8)).resize((128, 128), Image.BICUBIC).convert("RGB")
+    other = Image.fromarray(rng.integers(0, 255, (8, 8), dtype=np.uint8)).resize((128, 128), Image.BICUBIC).convert("RGB")
+    (tmp_path / "data" / "Training" / "glioma").mkdir(parents=True)
+    (tmp_path / "data" / "Testing" / "glioma").mkdir(parents=True)
+    base.save(tmp_path / "data" / "Training" / "glioma" / "twin.png")
+    other.save(tmp_path / "data" / "Training" / "glioma" / "keep.png")
+    base.resize((90, 90)).save(tmp_path / "data" / "Testing" / "glioma" / "twin_of_train.jpg")
+
+    pipeline.stage_remove_train_test_duplicates()
+
+    assert not (tmp_path / "data" / "Training" / "glioma" / "twin.png").exists()
+    assert (tmp_path / "data" / "Training" / "glioma" / "keep.png").exists()
+    assert (tmp_path / "data" / "Testing" / "glioma" / "twin_of_train.jpg").exists()
+    assert (tmp_path / "data" / "_quarantined_duplicates_of_test" / "Testing" / "glioma" / "twin.png").exists()
+    assert pipeline._stage_done("remove_train_test_duplicates")

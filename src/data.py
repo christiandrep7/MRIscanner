@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 from src.config import DataConfig
+from src.external_data import patient_id_of
 
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -206,6 +207,33 @@ def _split_train_val_indices(num_items: int, val_split: float, seed: int) -> tup
     return train_indices, val_indices
 
 
+def _split_train_val_indices_grouped(
+    group_keys: list[str | None], val_split: float, seed: int
+) -> tuple[list[int], list[int]]:
+    """Like _split_train_val_indices, but items sharing a (non-None) group key
+    always land on the same side. Used so one patient's neighbouring slices can't
+    straddle train/val -- near-identical images across that boundary make val
+    loss (which drives early stopping and checkpoint choice) optimistic. Items
+    with key None (e.g. Kaggle images, which ship no patient ids) are each their
+    own group."""
+    groups: dict[object, list[int]] = {}
+    for i, key in enumerate(group_keys):
+        groups.setdefault(key if key is not None else ("solo", i), []).append(i)
+    order = list(groups)
+    random.Random(seed).shuffle(order)
+
+    target = int(len(group_keys) * val_split)
+    val_indices: list[int] = []
+    val_groups: set[object] = set()
+    for g in order:
+        if len(val_indices) >= target:
+            break
+        val_indices.extend(groups[g])
+        val_groups.add(g)
+    train_indices = [i for g in order if g not in val_groups for i in groups[g]]
+    return sorted(train_indices), sorted(val_indices)
+
+
 def build_dataloaders(config: DataConfig) -> MRIDataBundle:
     train_dir = config.data_root / config.train_dir_name
     test_dir = config.data_root / config.test_dir_name
@@ -219,8 +247,8 @@ def build_dataloaders(config: DataConfig) -> MRIDataBundle:
     full_train_for_eval = datasets.ImageFolder(train_dir, transform=get_eval_transforms(config.image_size))
     test_dataset = datasets.ImageFolder(test_dir, transform=get_eval_transforms(config.image_size))
 
-    train_indices, val_indices = _split_train_val_indices(
-        num_items=len(full_train_for_aug),
+    train_indices, val_indices = _split_train_val_indices_grouped(
+        [patient_id_of(path) for path, _ in full_train_for_aug.samples],
         val_split=config.val_split,
         seed=config.seed,
     )

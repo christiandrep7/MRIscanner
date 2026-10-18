@@ -14,9 +14,10 @@ license agreement -- a real per-person legal step, not something automatable).
 """
 from __future__ import annotations
 
+import random
+import re
 from pathlib import Path
 
-import nibabel as nib
 import numpy as np
 from PIL import Image
 
@@ -54,6 +55,8 @@ def _load_axial_volume(nii_path: Path) -> np.ndarray:
     conventions aren't guaranteed consistent across datasets/scanners, and
     slicing a raw un-reoriented volume can silently give a sagittal or coronal
     slice instead (caught by visually spot-checking a real extracted slice)."""
+    import nibabel as nib  # lazy: only extraction needs it; src.data imports this module on servers without nibabel
+
     img = nib.as_closest_canonical(nib.load(str(nii_path)))
     return img.get_fdata()
 
@@ -151,3 +154,57 @@ def extract_ixi_notumor_slices(
             written += 1
 
     return written
+
+
+# Every extracted slice is named <patient>_slice<N>.png, so the patient a slice
+# came from can always be recovered from the filename alone.
+_PATIENT_RE = re.compile(r"^(BraTS20_Training_\d+|IXI\d+)_slice\d+\.png$")
+
+
+def patient_id_of(path: Path | str) -> str | None:
+    """Patient/subject id embedded in an extracted slice's filename, or None for
+    files that don't carry one (e.g. the Kaggle dataset, which ships no ids)."""
+    m = _PATIENT_RE.match(Path(path).name)
+    return m.group(1) if m else None
+
+
+def split_by_patient(
+    src_dir: Path, train_dest: Path, test_dest: Path, test_fraction: float, seed: int
+) -> tuple[int, int]:
+    """Moves slices from src_dir into train_dest/test_dest, assigning *whole
+    patients* to one side. A slice-level shuffle (what this pipeline did first)
+    lets the same brain's neighbouring slices land on both sides, so the test
+    set partly measures recognizing patients already seen in training -- every
+    one of the original external test slices had a same-patient slice in
+    training. Returns (n_train_slices, n_test_slices)."""
+    by_patient: dict[str, list[Path]] = {}
+    for img in sorted(src_dir.glob("*.png")):
+        pid = patient_id_of(img)
+        if pid is None:
+            raise ValueError(f"Can't tell which patient {img.name} belongs to; refusing to split by slice.")
+        by_patient.setdefault(pid, []).append(img)
+
+    patients = sorted(by_patient)
+    random.Random(seed).shuffle(patients)
+    n_test_patients = max(1, round(len(patients) * test_fraction)) if len(patients) > 1 else 0
+    test_patients = set(patients[:n_test_patients])
+
+    train_dest.mkdir(parents=True, exist_ok=True)
+    test_dest.mkdir(parents=True, exist_ok=True)
+    n_train = n_test = 0
+    for pid, imgs in by_patient.items():
+        dest, is_test = (test_dest, True) if pid in test_patients else (train_dest, False)
+        for img in imgs:
+            img.rename(dest / img.name)
+        if is_test:
+            n_test += len(imgs)
+        else:
+            n_train += len(imgs)
+    return n_train, n_test
+
+
+def find_patient_overlap(dir_a: Path, dir_b: Path) -> set[str]:
+    """Patient ids that have slices under both directories (searched recursively).
+    Should be empty for any train/test pair."""
+    ids = lambda root: {pid for f in Path(root).rglob("*.png") if (pid := patient_id_of(f))}
+    return ids(dir_a) & ids(dir_b)

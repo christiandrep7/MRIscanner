@@ -13,13 +13,18 @@ Usage:
 """
 from __future__ import annotations
 
-import random
 import shutil
 from pathlib import Path
 
 from src.benchmark import benchmark_models, default_checkpoint_specs, save_benchmark_report
 from src.config import DataConfig, TrainConfig
-from src.external_data import extract_brats_glioma_slices, extract_ixi_notumor_slices
+from src.external_data import (
+    extract_brats_glioma_slices,
+    extract_ixi_notumor_slices,
+    find_patient_overlap,
+    split_by_patient,
+)
+from src.leakage import quarantine_train_duplicates_of_test
 from src.secret_dedupe_eval import build_reference_index, dedupe_secret
 from src.train_all import train_all
 
@@ -160,31 +165,46 @@ def stage_dedupe_and_merge() -> None:
     )
     print(f"  -> dedupe stats: {stats}")
 
-    print("[run] Splitting into data/Training (merge) and data/ExternalTesting (held out)...")
-    rng = random.Random(SPLIT_SEED)
+    print("[run] Splitting by PATIENT into data/Training (merge) and data/ExternalTesting (held out)...")
     for class_name in ["glioma", "notumor"]:
         src_dir = EXTERNAL_DEDUPED_DIR / class_name
         if not src_dir.exists():
             print(f"  no deduped images for {class_name}, skipping")
             continue
-        images = sorted(src_dir.glob("*.png"))
-        rng.shuffle(images)
-        n_test = int(len(images) * EXTERNAL_TEST_FRACTION)
-        test_images, train_images = images[:n_test], images[n_test:]
+        n_train, n_test = split_by_patient(
+            src_dir,
+            Path("data/Training") / class_name,
+            Path("data/ExternalTesting") / class_name,
+            test_fraction=EXTERNAL_TEST_FRACTION,
+            seed=SPLIT_SEED,
+        )
+        print(f"  {class_name}: {n_train} slices -> Training, {n_test} slices -> ExternalTesting")
 
-        train_dest = Path("data/Training") / class_name
-        test_dest = Path("data/ExternalTesting") / class_name
-        train_dest.mkdir(parents=True, exist_ok=True)
-        test_dest.mkdir(parents=True, exist_ok=True)
-
-        for p in train_images:
-            p.rename(train_dest / p.name)
-        for p in test_images:
-            p.rename(test_dest / p.name)
-
-        print(f"  {class_name}: {len(train_images)} -> Training, {len(test_images)} -> ExternalTesting")
+    # Hard guarantee, not a hope: no patient may have slices on both sides.
+    overlap = find_patient_overlap(Path("data/Training"), Path("data/ExternalTesting"))
+    if overlap:
+        raise RuntimeError(f"Patient leakage: {len(overlap)} patients in both train and test, e.g. {sorted(overlap)[:5]}")
+    print("  verified: 0 patients appear in both Training and ExternalTesting")
 
     _mark_stage_done("dedupe_and_merge")
+
+
+def stage_remove_train_test_duplicates() -> None:
+    """The Kaggle set has no patient ids, but ~27% of its 'held-out' Testing
+    images have a near-identical twin (same scan re-saved) in Training --
+    measured here before this stage existed. Twins are moved out of Training
+    (never out of the test sets, so results stay comparable) into
+    data/_quarantined_duplicates_of_test, which ImageFolder never reads."""
+    if _stage_done("remove_train_test_duplicates"):
+        print("[skip] Train/test duplicates already quarantined.")
+        return
+    quarantine = Path("data/_quarantined_duplicates_of_test")
+    for test_name in ("Testing", "ExternalTesting"):
+        test_dir = Path("data") / test_name
+        if test_dir.exists():
+            moved = quarantine_train_duplicates_of_test(Path("data/Training"), test_dir, quarantine / test_name)
+            print(f"[run] {test_name}: moved {moved} near-duplicate training images to quarantine")
+    _mark_stage_done("remove_train_test_duplicates")
 
 
 def stage_cleanup_raw_downloads() -> None:
@@ -236,6 +256,7 @@ def main() -> None:
     stage_process_brats()
     stage_process_ixi()
     stage_dedupe_and_merge()
+    stage_remove_train_test_duplicates()
     stage_cleanup_raw_downloads()
     stage_train_all()
     stage_benchmark()
