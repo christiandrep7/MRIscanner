@@ -26,6 +26,8 @@ def _save(img: Image.Image, path: Path) -> None:
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch) -> rct.Paths:
     monkeypatch.chdir(tmp_path)
+    # the real function downloads BraTS/IXI; it has its own test below
+    monkeypatch.setattr(rct, "_ensure_old_external_data_in_training", lambda data_root: None)
     seed = 0
 
     def nxt() -> int:
@@ -126,3 +128,28 @@ def test_phash_lookalikes_with_different_patient_ids_do_not_trip_the_gate(tmp_pa
     _save(img, tmp_path / "Training" / "glioma" / "BraTS20_Training_001_slice5.png")
     _save(img.resize((90, 90)), tmp_path / "Testing" / "glioma" / "BraTS20_Validation_002_slice5.png")  # same look, different patient
     assert assert_no_leakage(tmp_path / "Training", [tmp_path / "Testing"]).clean
+
+
+def test_old_external_data_is_rebuilt_into_training_on_a_fresh_machine(tmp_path: Path, monkeypatch):
+    import run_external_data_pipeline as old
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(old, "EXTERNAL_SLICES_DIR", tmp_path / "slices")
+    _save(_smooth(1), tmp_path / "data" / "Training" / "glioma" / "tr_0.jpg")
+
+    def fake_brats():
+        _save(_smooth(2), old.EXTERNAL_SLICES_DIR / "glioma" / "BraTS20_Training_001_slice5.png")
+
+    def fake_ixi():
+        _save(_smooth(3), old.EXTERNAL_SLICES_DIR / "notumor" / "IXI002_slice9.png")
+
+    monkeypatch.setattr(old, "stage_process_brats", fake_brats)
+    monkeypatch.setattr(old, "stage_process_ixi", fake_ixi)
+    rct._ensure_old_external_data_in_training(tmp_path / "data")
+    assert (tmp_path / "data" / "Training" / "glioma" / "BraTS20_Training_001_slice5.png").exists()
+    assert (tmp_path / "data" / "Training" / "notumor" / "IXI002_slice9.png").exists()
+    assert not (tmp_path / "slices").exists()
+
+    # already present -> nothing is re-downloaded
+    monkeypatch.setattr(old, "stage_process_brats", lambda: pytest.fail("should not re-run"))
+    rct._ensure_old_external_data_in_training(tmp_path / "data")

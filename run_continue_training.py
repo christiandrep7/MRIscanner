@@ -193,15 +193,46 @@ def _drop_eval_images_with_train_twins(paths: Paths, eval_name: str) -> int:
     return sum(1 for f in twins if patient_id_of(f) is None)
 
 
+def _ensure_old_external_data_in_training(data_root: Path) -> None:
+    """The starting weights were trained on BraTS (369 patients) + IXI slices. On a fresh
+    machine (Colab) those aren't on disk, so rebuild them and put ALL of them in Training --
+    the starting weights saw them, so none may be used for validation or testing."""
+    train = data_root / "Training"
+    has_brats = any((train / "glioma").glob("BraTS20_Training_*")) if (train / "glioma").exists() else False
+    has_ixi = any((train / "notumor").glob("IXI*")) if (train / "notumor").exists() else False
+    if has_brats and has_ixi:
+        return
+    import run_external_data_pipeline as old
+
+    print("[run] Rebuilding the BraTS/IXI training slices the starting checkpoints were trained on...")
+    old.stage_process_brats()
+    old.stage_process_ixi()
+    for cls in ("glioma", "notumor"):
+        src = old.EXTERNAL_SLICES_DIR / cls
+        (train / cls).mkdir(parents=True, exist_ok=True)
+        for f in sorted(src.glob("*.png")):
+            f.rename(train / cls / f.name)
+    shutil.rmtree(old.EXTERNAL_SLICES_DIR, ignore_errors=True)
+
+
 def stage_assemble_data(paths: Paths) -> None:
     if _done(paths, "assemble_data", paths.data / "Validation"):
         print("[skip] data already assembled")
         return
     d, st = paths.data, paths.staging / "slices"
     if not (d / "Training").exists():
+        import sys
+
         import download_mri_dataset
 
-        download_mri_dataset.main()
+        saved_argv = sys.argv
+        sys.argv = ["download_mri_dataset"]  # its main() runs argparse over sys.argv; ours has other flags
+        try:
+            download_mri_dataset.main()
+        finally:
+            sys.argv = saved_argv
+
+    _ensure_old_external_data_in_training(d)
 
     # The starting weights were trained with these patients' slices -> they can't be test data.
     old_ext = d / "ExternalTesting"
